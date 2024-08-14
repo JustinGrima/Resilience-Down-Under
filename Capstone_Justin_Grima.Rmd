@@ -1,0 +1,3643 @@
+---
+title: "Capstone_Jusin_Grima"
+output: html_document
+date: "2023-10-02"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries used
+```{r}
+library(psych)
+library(dplyr)
+library(ggplot2)
+library(TTR)
+library(glmnet)
+library(caret)
+library(rpart)
+library(caTools)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+library(e1071)
+library(ROCR)
+library(keras)
+library(missForest)
+library(tidyr)
+library(mice)
+```
+
+
+Load Data and Pre-processing
+```{r}
+?mice
+#Load data
+abs_unemply <- read.csv("Aus_data_2023.csv")
+
+# View dataset
+head(abs_unemply)
+
+#________________Data Pre-processing________________
+
+#Change Column Names for easier comprehension
+
+colnames(abs_unemply) = c("DATE", "UNEMP_RATE", "GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+head(abs_unemply)
+
+#Date Conversion
+# Convert dates to the correct format to then split into training and testing datasets.
+convert_month <- function(month) {
+  month_names <- c(Jan = "01", Feb = "02", Mar = "03", Apr = "04", May = "05", Jun = "06", Jul = "07", Aug = "08", Sep = "09", Oct = "10", Nov = "11", Dec = "12")
+  return(month_names[month])
+}
+
+#Split current date format
+(months_numeric <- sapply(strsplit(abs_unemply$DATE, "_"), function(x) convert_month(x[2])))
+
+
+# Create a new date string with '/' separator and add a day (1st) to the date.
+(abs_unemply$DATE <- paste(substr(abs_unemply$DATE, 1, 4), months_numeric, "01", sep = "/"))
+
+# Convert to Date format
+(abs_unemply$DATE <- as.Date(abs_unemply$DATE))
+#View changes
+head(abs_unemply)
+
+# Check missing data in training
+(sum(is.na(abs_unemply))) # 11
+(missing_values = colSums(is.na(abs_unemply))) # Due to the small size of the dataset, it is not recommended to remove observations or variables. Instead we can conduct imputation of the missing values.
+
+#DATE  UNEMP_RATE   GDP   GOV_FCE   CHNG_FCE_ALL_IND   TTI   CPI    JOB_VACAN    RES_POP
+# 0        0        1       1                1           1    0        5           2 
+
+#-----Implement mean for missing values using randome forest-----
+#As described by the Australian Beraeu of statistics JVS was suspended for five quarters between August 2008 and August 2009 which resulted in a gap in the X6 column. From this we can conclude that this is Missingness Not At Random. The other missing values are considered Missing at Random. As mentioned before we will not remove any rows or variables due to the size of the dataset. Instead we will conduct a sensitivity analysis by imputing different values and see how it affects your results. I will use MICE with a variety of methods and missForest to determine which produced the best results using their own imputed values.
+
+
+# Pull all predictor variables used for imputation.
+
+pred_var = data.frame(abs_unemply[,c(3:9)])
+
+#----- missForest imputation-----
+set.seed(1234)
+mf_imputed <- data.frame(
+  original = pred_var,
+  imputed_missForest = missForest(pred_var)$ximp
+)
+
+# Summary
+dim(mf_imputed) # 166  14
+mf_imputed [c(104:166),]
+
+# Visualisations for missForest imputation GDP
+par(mfrow = c(2,1))
+barplot(mf_imputed$original.GDP, col = "red", xlab = "Original", ylab = "count", main = "Change in Gross Domestic Product (%) Original Distribution")
+barplot(mf_imputed$original.GDP, xlab = "mf_imputed", ylab = "count", col = "blue",main = "Change in Gross Domestic Product (%) missForest-imputed Distribution")
+
+# Visualisations for missForest imputation Government final consumption expenditure 
+barplot(mf_imputed$original.GOV_FCE, col = "red", xlab = "Original", ylab = "count", main = "Change in Government Final Consumption Expenditure (%) Original Distribution")
+barplot(mf_imputed$imputed_missForest.GOV_FCE, xlab = "mf_imputed", ylab = "count", col = "blue",main = "Change in Government Final Consumption Expenditure (%) missForest-imputed Distribution")
+
+# Visualisations for missForest imputation final consumption expenditure of all industry sectors 
+barplot(mf_imputed$original.CHNG_FCE_ALL_IND, col = "red", xlab = "Original", ylab = "count", main = "Change in Final Consumption Expenditure of all Industry Sectors Original Distribution")
+barplot(mf_imputed$imputed_missForest.CHNG_FCE_ALL_IND, xlab = "mf_imputed", ylab = "count", col = "blue",main = "Change in Final Consumption Expenditure of all Industry Sectors (%) missForest-imputed Distribution")
+
+# Visualisations for missForest imputation Term of trade index 
+barplot(mf_imputed$original.TTI, col = "red", xlab = "original", ylab = "count", main = "Term of Trade Index (%) Original Distribution")
+barplot(mf_imputed$original.TTI, xlab = "mf_imputed", ylab = "count", col = "blue",main = "Term of Trade Index (%) missForest-imputed Distribution")
+
+
+# Visualisations for missForest imputation Number of job vacancies
+barplot(mf_imputed$original.JOB_VACAN, col = "red", xlab = "Original", ylab = "count", main = "Number of job vacancies (thousands) Original Distribution")
+barplot(mf_imputed$imputed_missForest.JOB_VACAN, xlab = "mf_imputed", ylab = "count", col = "blue",main = "Number of Job Vacancies (thousands) missForest-imputed Distribution")
+
+ggplot(abs_unemply, aes(x = DATE, y = mf_imputed$imputed_missForest.JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  labs(title = "Job Vacancies in Australia from 1982 to 2020 missForest Imputation", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Visualisations for missForest imputation Resident Population in thousands
+barplot(mf_imputed$original.RES_POP, col = "red", xlab = "Original", ylab = "count", main = "Resident Population (thousands) Original Distribution")
+barplot(mf_imputed$imputed_missForest.RES_POP, xlab = "mf_imputed", ylab = "count", col = "blue",main = "Resident Population (thousands) missForest-imputed Distribution")
+par(mfrow = c(1,1))
+
+
+
+#-----MICE Imputation----- 
+# Define the variables to impute
+var_impute <- c("GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+
+# Set the seed for reproducibility
+set.seed(1234)
+
+# Combine the imputed variables with the original data
+mice_imputed <- data.frame(
+  original = pred_var,
+  imputed_pmm = complete(mice(data.frame(pred_var[var_impute]), method = "pmm")), # Predictive Mean Matching
+  imputed_lrpv = complete(mice(data.frame(pred_var[var_impute]), method = "norm.predict")), # Linear regression, predicted values
+  imputed_lrb = complete(mice(data.frame(pred_var[var_impute]), method = "norm.boot")), # Linear regression using bootstrap
+  imputed_rs = complete(mice(data.frame(pred_var[var_impute]), method = "sample")) # Random sample from observed values 
+)
+
+# Summary
+dim(mice_imputed) #166  35
+mice_imputed[c(104:166),]
+
+
+# Visualizations for each using JOB vacancies
+# Visualization: Predictive Mean Matching
+par(mfrow = c(2,1))
+barplot(mice_imputed$original.JOB_VACAN, col = "red", xlab = "Original", ylab = "count", main = "Original Distribution")
+barplot(mice_imputed$imputed_pmm.JOB_VACAN, xlab = "Predictive mean matching", ylab = "count", col = "blue",main = "Predictive mean matching")
+par(mfrow = c(1,1))
+
+ggplot(abs_unemply, aes(x = DATE, y = mice_imputed$imputed_pmm.JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  labs(title = "Job Vacancies in Australia from 1982 to 2020 Predictive Mean Matching Imputation", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Visualization: Linear regression, predicted values
+par(mfrow = c(2,1))
+barplot(mice_imputed$original.JOB_VACAN, col = "red", xlab = "Original", ylab = "count", main = "Original Distribution")
+barplot(mice_imputed$imputed_lrpv.JOB_VACAN, xlab = "Linear regression, predicted values", ylab = "count", col = "blue",main = "Linear regression, predicted values")
+par(mfrow = c(1,1))
+
+ggplot(abs_unemply, aes(x = DATE, y = mice_imputed$imputed_lrpv.JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  labs(title = "Job Vacancies in Australia from 1982 to 2020 Linear regression Predicted Values Imputation", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Visualization: Linear regression using bootstrap 
+par(mfrow = c(2,1))
+barplot(mice_imputed$original.JOB_VACAN, col = "red", xlab = "Original", ylab = "count", main = "Original Distribution")
+barplot(mice_imputed$imputed_lrb.JOB_VACAN, xlab = "Linear regression using bootstrap", ylab = "count", col = "blue",main = "Linear regression using bootstrap")
+par(mfrow = c(1,1))
+
+ggplot(abs_unemply, aes(x = DATE, y = mice_imputed$imputed_lrb.JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  labs(title = "Job Vacancies in Australia from 1982 to 2020 Linear Regression using Bootstrap Imputation", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Visualization: Random sample from observed values  
+par(mfrow = c(2,1))
+barplot(mice_imputed$original.JOB_VACAN, col = "red", xlab = "Original", ylab = "count", main = "Original Distribution")
+barplot(mice_imputed$imputed_rs.JOB_VACAN, xlab = "Random Sample from Observed Values", ylab = "count", col = "blue",main = " Random sample from observed values")
+par(mfrow = c(1,1))
+
+ggplot(abs_unemply, aes(x = DATE, y = mice_imputed$imputed_rs.JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  labs(title = "Job Vacancies in Australia from 1982 to 2020 Random Sample from Observed Values Imputation", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#-----Median Imputation-----
+# Apply the function to replace missing values
+abs_unemply_med <- abs_unemply
+
+(missing_values = colSums(is.na(abs_unemply_med)))
+abs_unemply_med <- abs_unemply_med %>% mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE))))
+(missing_values = colSums(is.na(abs_unemply_med)))
+head(abs_unemply_med)
+dim(abs_unemply_med) #  166   9
+
+# Visualization: Median Imputation
+par(mfrow = c(2,1))
+barplot(abs_unemply$JOB_VACAN, col = "red", xlab = "original", ylab = "count", main = "Original Distribution")
+barplot(abs_unemply_med$JOB_VACAN, xlab = "Median Imputation", ylab = "count", col = "blue",main = "Median Imputation")
+par(mfrow = c(1,1))
+
+ggplot(abs_unemply, aes(x = DATE, y = abs_unemply_med$JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  labs(title = "Job Vacancies in Australia from 1982 to 2020 Median Imputation", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+#-----Create new datasets for missForest and all MICE -----
+
+#Create new dataset for missForest imputation values
+abs_unemply_mf = abs_unemply[,c(1,2)]
+abs_unemply_mf = cbind(abs_unemply_mf, mf_imputed[,c(8:14)])
+colnames(abs_unemply_mf) = c("DATE", "UNEMP_RATE", "GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+head(abs_unemply_mf)
+dim(abs_unemply_mf) # 166   9
+
+View(mice_imputed)
+#Create new dataset for Predictive Mean Matching imputation values
+abs_unemply_ppm <- abs_unemply[,c(1,2)]
+abs_unemply_ppm <- cbind(abs_unemply_ppm, mice_imputed[,c(8:14)])
+colnames(abs_unemply_ppm) = c("DATE", "UNEMP_RATE", "GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+head(abs_unemply_ppm)
+dim(abs_unemply_ppm) # 166   9
+
+#Create new dataset for Linear regression, predicted values
+abs_unemply_lrpv <- abs_unemply[,c(1,2)]
+abs_unemply_lrpv <- cbind(abs_unemply_lrpv, mice_imputed[,c(15:21)])
+colnames(abs_unemply_lrpv) = c("DATE", "UNEMP_RATE", "GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+head(abs_unemply_lrpv)
+dim(abs_unemply_lrpv) # 166   9
+
+#Create new dataset for Linear regression using bootstrap
+abs_unemply_lrb <- abs_unemply[,c(1,2)]
+abs_unemply_lrb <- cbind(abs_unemply_lrb, mice_imputed[,c(22:28)])
+colnames(abs_unemply_lrb) = c("DATE", "UNEMP_RATE", "GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+head(abs_unemply_lrb)
+dim(abs_unemply_lrb) # 166   9
+
+#Create new dataset for Random sample from observed values 
+abs_unemply_rs <- abs_unemply[,c(1,2)]
+abs_unemply_rs <- cbind(abs_unemply_rs, mice_imputed[,c(29:35)])
+colnames(abs_unemply_rs) = c("DATE", "UNEMP_RATE", "GDP", "GOV_FCE", "CHNG_FCE_ALL_IND", "TTI", "CPI", "JOB_VACAN", "RES_POP")
+head(abs_unemply_rs)
+dim(abs_unemply_rs) # 166   9
+
+
+#pairs.panel of each imputation
+
+#Pairs.panels on missForest
+pairs.panels(abs_unemply_mf[,-c(1,2,7)])
+
+#pmm
+pairs.panels(abs_unemply_ppm[,-c(1,2,7)])
+
+#Linear regression, predicted values
+pairs.panels(abs_unemply_lrpv[,-c(1,2,7)])
+
+#Linear regression, using bootstrapping
+pairs.panels(abs_unemply_lrb[,-c(1,2,7)])
+
+#Random sample from observed values 
+pairs.panels(abs_unemply_rs[,-c(1,2,7)])
+
+#pairs.panel median imputation
+pairs.panels(abs_unemply_med[,-c(1,2,7)])
+```
+
+
+Use the data from Dec 1982 to Dec 2020 as the training set
+```{r}
+#-----Split data into training and testing dataset missForest-----
+# Create training dataset from 1982 - 2020
+(abs_unemply_train_mf <- subset(abs_unemply_mf, DATE >= as.Date("1982-12-01") & DATE <= as.Date("2020-12-01")))
+head(abs_unemply_train_mf)
+dim(abs_unemply_train_mf)#153   9
+str(abs_unemply_train_mf)
+
+# Create test dataset from 2020 to 2023
+(abs_unemply_test_mf <- subset(abs_unemply_mf, DATE > as.Date("2020-12-01")))
+head(abs_unemply_test_mf)
+dim(abs_unemply_test_mf)#10 9
+str(abs_unemply_test_mf)
+
+#Before beginning, we remove the date variable as it is not a relevant variable in to use in the machine learning algorithms and was only used as a criteria to split the dataset into training and testing. Further, in the dataset description we see that there a only 7 predictor variables (X1 - X7) and 1 response variable (Y), which does not include the date variable. Therefore, we remove the date variable.
+
+#Training
+unemp_train_mf = abs_unemply_train_mf[,-1]
+head(unemp_train_mf)
+dim(unemp_train_mf)#153   8
+str(unemp_train_mf)
+
+#Testing
+unemp_test_mf = abs_unemply_test_mf[,-1]
+head(unemp_test_mf)
+dim(unemp_test_mf)#10   8
+str(unemp_test_mf)
+
+
+#-----Split data into training and testing dataset ppm-----
+# Create training dataset from 1982 - 2020
+(abs_unemply_train_ppm <- subset(abs_unemply_ppm, DATE >= as.Date("1982-12-01") & DATE <= as.Date("2020-12-01")))
+head(abs_unemply_train_ppm)
+dim(abs_unemply_train_ppm)#153   9
+str(abs_unemply_train_ppm)
+
+# Create test dataset from 2020 to 2023
+(abs_unemply_test_ppm <- subset(abs_unemply_ppm, DATE > as.Date("2020-12-01")))
+head(abs_unemply_test_ppm)
+dim(abs_unemply_test_ppm)#10 9
+str(abs_unemply_test_ppm)
+
+#Training
+unemp_train_ppm = abs_unemply_train_ppm[,-1]
+head(unemp_train_ppm)
+dim(unemp_train_ppm)#153   8
+str(unemp_train_ppm)
+
+#Testing
+unemp_test_ppm = abs_unemply_test_ppm[,-1]
+head(unemp_test_ppm)
+dim(unemp_test_ppm)#10   8
+str(unemp_test_ppm)
+
+#-----Split data into training and testing dataset Linear regression, predicted values -----
+# Create training dataset from 1982 - 2020
+(abs_unemply_train_lrpv <- subset(abs_unemply_lrpv, DATE >= as.Date("1982-12-01") & DATE <= as.Date("2020-12-01")))
+head(abs_unemply_train_lrpv)
+dim(abs_unemply_train_lrpv)#153   9
+str(abs_unemply_train_lrpv)
+
+# Create test dataset from 2020 to 2023
+(abs_unemply_test_lrpv <- subset(abs_unemply_lrpv, DATE > as.Date("2020-12-01")))
+head(abs_unemply_test_lrpv)
+dim(abs_unemply_test_lrpv)#10 9
+str(abs_unemply_test_lrpv)
+
+#Training
+unemp_train_lrpv = abs_unemply_train_lrpv[,-1]
+head(unemp_train_lrpv)
+dim(unemp_train_lrpv)#153   8
+str(unemp_train_lrpv)
+
+#Testing
+unemp_test_lrpv = abs_unemply_test_lrpv[,-1]
+head(unemp_test_lrpv)
+dim(unemp_test_lrpv)#10   8
+str(unemp_test_lrpv)
+
+#-----Split data into training and testing dataset Linear Regression with bootstrap -----
+# Create training dataset from 1982 - 2020
+(abs_unemply_train_lrb <- subset(abs_unemply_lrb, DATE >= as.Date("1982-12-01") & DATE <= as.Date("2020-12-01")))
+head(abs_unemply_train_lrb)
+dim(abs_unemply_train_lrb)#153   9
+str(abs_unemply_train_lrb)
+
+# Create test dataset from 2020 to 2023
+(abs_unemply_test_lrb <- subset(abs_unemply_lrb, DATE > as.Date("2020-12-01")))
+head(abs_unemply_test_lrb)
+dim(abs_unemply_test_lrb)#10 9
+str(abs_unemply_test_lrb)
+
+#Training
+unemp_train_lrb = abs_unemply_train_lrb[,-1]
+head(unemp_train_lrb)
+dim(unemp_train_lrb)#153   8
+str(unemp_train_lrb)
+
+#Testing
+unemp_test_lrb = abs_unemply_test_lrb[,-1]
+head(unemp_test_lrb)
+dim(unemp_test_lrb)#10   8
+str(unemp_test_lrb)
+
+#-----Split data into training and testing dataset Random Sampling -----
+# Create training dataset from 1982 - 2020
+(abs_unemply_train_rs <- subset(abs_unemply_rs, DATE >= as.Date("1982-12-01") & DATE <= as.Date("2020-12-01")))
+head(abs_unemply_train_rs)
+dim(abs_unemply_train_rs)#153   9
+str(abs_unemply_train_rs)
+
+# Create test dataset from 2020 to 2023
+(abs_unemply_test_rs <- subset(abs_unemply_rs, DATE > as.Date("2020-12-01")))
+head(abs_unemply_test_rs)
+dim(abs_unemply_test_rs)#10 9
+str(abs_unemply_test_rs)
+
+#Training
+unemp_train_rs = abs_unemply_train_rs[,-1]
+head(unemp_train_rs)
+dim(unemp_train_rs)#153   8
+str(unemp_train_rs)
+
+#Testing
+unemp_test_rs = abs_unemply_test_rs[,-1]
+head(unemp_test_rs)
+dim(unemp_test_rs)#10   8
+str(unemp_test_rs)
+
+#-----Split data into training and testing dataset Median -----
+# Create training dataset from 1982 - 2020
+(abs_unemply_train_med <- subset(abs_unemply_med, DATE >= as.Date("1982-12-01") & DATE <= as.Date("2020-12-01")))
+head(abs_unemply_train_med)
+dim(abs_unemply_train_med)#153   9
+str(abs_unemply_train_med)
+
+# Create test dataset from 2020 to 2023
+(abs_unemply_test_med <- subset(abs_unemply_med, DATE > as.Date("2020-12-01")))
+head(abs_unemply_test_med)
+dim(abs_unemply_test_med)#10 9
+str(abs_unemply_test_med)
+
+#Training
+unemp_train_med = abs_unemply_train_med[,-1]
+head(unemp_train_med)
+dim(unemp_train_med)#153   8
+str(unemp_train_med)
+
+#Testing
+unemp_test_med = abs_unemply_test_med[,-1]
+head(unemp_test_med)
+dim(unemp_test_med)#10   8
+str(unemp_test_med)
+```
+
+
+Testing Different imputation datasets on ML algorithms: Ridge Regression, Boosting, and SVM with radial Kernel to find best imputation method based on MSE and RMSE.
+
+A.i) Ride Regression: missForest
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_mf <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_mf)[,-1]# All 7 predictors
+head(x_mf) # Scaling did not occur
+dim(x_mf) # 153   7
+
+y_mf <- unemp_train_mf$UNEMP_RATE # Response
+head(y_mf)
+length(y_mf) # 153
+
+# Fit original ridge regression model
+ridge_mod_mf <- glmnet(x = x_mf, 
+                       y = y_mf, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_mf, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_mf)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_mf <- cv.glmnet(x = x_mf,
+                         y = y_mf,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_mf)
+
+#View plot
+plot(cv_ridge_mf)
+
+#Determine best lambda value
+(best_lambda_ridge_mf = cv_ridge_mf$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_mf <- glmnet(x = x_mf,
+                            y = y_mf,
+                            lambda = best_lambda_ridge_mf,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_mf)
+
+# View coefficients
+coef(best_ridge_mod_mf)
+
+# Predict
+x1_mf <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_mf)[,-1]# All 7 predictors 
+head(x1_mf) # Scaling did not occur
+dim(x1_mf) #10   7
+
+ridge_pre_mf <- predict(best_ridge_mod_mf,
+                        newx = x1_mf, 
+                        alpha=0,
+                        s= best_lambda_ridge_mf)
+# View prediction
+ridge_pre_mf
+
+# Performance
+ridge_mse_mf = mean((ridge_pre_mf - unemp_test_mf$UNEMP_RATE) ^2)
+ridge_mse_mf #37.95831
+
+ridge_rmse_mf = sqrt(mean((ridge_pre_mf - unemp_test_mf$UNEMP_RATE) ^2))
+ridge_rmse_mf #6.161032
+```
+
+
+B.i) Boosting: missForest
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_mf <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_mf, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_mf)
+boost_model_mf
+
+# Predict
+boost_pred_mf <- predict(boost_model_mf, unemp_test_mf)
+
+# MSE
+boost_mse_mf <- mean((boost_pred_mf - unemp_test_mf$UNEMP_RATE)^2)
+boost_mse_mf #2.884317
+
+# RMSE
+boost_rmse_mf <- sqrt(mean((boost_pred_mf - unemp_test_mf$UNEMP_RATE)^2))
+boost_rmse_mf #1.698328
+
+# Tuning parameters
+boost_grid_mf <-  expand.grid(interaction.depth = c(2,5,10,15),  # Max Tree Depth
+                              n.trees = (1:100), # Boosting Iterations
+                              shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                              n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                              )
+
+
+# Cross-validation
+fitControl_mf <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_mf <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_mf, 
+                             method = "gbm", 
+                             trControl = fitControl_mf, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_mf)
+
+# Best tuning parameters
+(best <- boost_grid_train_mf$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   95                10       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_mf <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_mf, 
+                           distribution = "gaussian", 
+                           n.trees = 95,
+                           interaction.depth = 10, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_mf)
+best_boost_model_mf
+
+# Predict
+best_boost_pred_mf <- predict(best_boost_model_mf, unemp_test_mf)
+
+# MSE
+best_boost_mse_mf <- mean((best_boost_pred_mf - unemp_test_mf$UNEMP_RATE)^2)
+best_boost_mse_mf #2.713513
+
+# RMSE
+best_boost_rmse_mf <- sqrt(mean((best_boost_pred_mf - unemp_test_mf$UNEMP_RATE)^2))
+best_boost_rmse_mf #1.647274 
+```
+
+
+C.i) SVM, Radial: missForest
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_mf <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_mf <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_mf <- expand.grid(cost = rad_cost_values_mf, gamma = rad_gamma_values_mf)
+
+
+start_time_rad_mf = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning for cost and radial SVM model. Fit the support vector classifier with 'scale = TRUE' for scaling.
+svm_rad_tune_mf <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_mf,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_mf,
+                        scale = TRUE)
+
+end_time_rad_mf = Sys.time()# End timer.
+runtime_rad_mf = end_time_rad_mf - start_time_rad_mf # Calculate run time.
+print(runtime_rad_mf) # Time difference of 6.62194 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_mf) # Based on detailed performance results, cost = 3.35 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_mf <- svm_rad_tune_mf$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  3.35 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  106
+
+# Model
+rad_svm_mf <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_mf,
+                  kernel = "radial",
+                  cost = 3.5,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_mf$index
+
+#View summary of svm model
+summary(rad_svm_mf)
+#This tells us, for instance, that a linear kernel was used with cost = 3.5, gamma = 0.1, epsilon = 0.1 and that there were 106 support vectors.
+
+# Predict
+rad_pre_mf <- predict(rad_svm_mf, unemp_test_mf)
+
+# MSE
+rad_mse_mf <- mean((rad_pre_mf - unemp_test_mf$UNEMP_RATE)^2)
+rad_mse_mf #3.961183
+
+# RMSE
+rad_rmse_mf <- sqrt(mean((rad_pre_mf - unemp_test_mf$UNEMP_RATE)^2))
+rad_rmse_mf #1.990272
+```
+
+MSE missForest Comparison
+```{r}
+Alg_Comparison_mf = print(paste("Machine Learnign Algorithm Comparisons:", "Ridge Regression:", "MSE = ", ridge_mse_mf,",", "RMSE = ", ridge_rmse_mf,",", "Boosting:", "MSE =", boost_mse_mf, ",", "RMSE =", boost_rmse_mf, "SVM - Radial:", "MSE =", rad_mse_mf, "RMSE =", rad_rmse_mf))
+```
+
+
+A.ii) Ride Regression: Predictive Mean Matching imputation
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_ppm <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_ppm)[,-1]# All 7 predictors
+head(x_ppm) # Scaling did not occur
+dim(x_ppm) # 153   7
+
+y_ppm <- unemp_train_ppm$UNEMP_RATE # Response
+head(y_ppm)
+length(y_ppm) # 153
+
+# Fit original ridge regression model
+ridge_mod_ppm <- glmnet(x = x_ppm, 
+                       y = y_ppm, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_ppm, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_ppm)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_ppm <- cv.glmnet(x = x_ppm,
+                         y = y_ppm,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_ppm)
+
+#View plot
+plot(cv_ridge_ppm)
+
+#Determine best lambda value
+(best_lambda_ridge_ppm = cv_ridge_ppm$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_ppm <- glmnet(x = x_ppm,
+                            y = y_ppm,
+                            lambda = best_lambda_ridge_ppm,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_ppm)
+
+# View coefficients
+coef(best_ridge_mod_ppm)
+
+# Predict
+x1_ppm <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_ppm)[,-1]# All 7 predictors 
+head(x1_ppm) # Scaling did not occur
+dim(x1_ppm) #10   7
+
+ridge_pre_ppm <- predict(best_ridge_mod_ppm,
+                        newx = x1_ppm, 
+                        alpha=0,
+                        s= best_lambda_ridge_ppm)
+# View prediction
+ridge_pre_ppm
+
+# Performance
+ridge_mse_ppm = mean((ridge_pre_ppm - unemp_test_ppm$UNEMP_RATE) ^2)
+ridge_mse_ppm #40.84981
+
+ridge_rmse_ppm = sqrt(mean((ridge_pre_ppm - unemp_test_ppm$UNEMP_RATE) ^2))
+ridge_rmse_ppm #6.391385
+```
+
+
+B.ii) Boosting: Predictive Mean Matching imputation
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_ppm <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_ppm, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_ppm)
+boost_model_ppm
+
+# Predict
+boost_pred_ppm <- predict(boost_model_ppm, unemp_test_ppm)
+
+# MSE
+boost_mse_ppm <- mean((boost_pred_ppm - unemp_test_ppm$UNEMP_RATE)^2)
+boost_mse_ppm #2.925119
+
+# RMSE
+boost_rmse_ppm <- sqrt(mean((boost_pred_ppm - unemp_test_ppm$UNEMP_RATE)^2))
+boost_rmse_ppm #1.710298
+
+# Tuning parameters
+boost_grid_ppm <-  expand.grid(interaction.depth = c(2,5,10,15),  # Max Tree Depth
+                        n.trees = (1:100), # Boosting Iterations
+                        shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                        n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                        )
+
+
+# Cross-validation
+fitControl_ppm <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_ppm <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_ppm, 
+                             method = "gbm", 
+                             trControl = fitControl_ppm, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_ppm)
+
+# Best tuning parameters
+(best <- boost_grid_train_ppm$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   91                10       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_ppm <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_ppm, 
+                           distribution = "gaussian", 
+                           n.trees = 91,
+                           interaction.depth = 10, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_ppm)
+best_boost_model_ppm
+
+# Predict
+best_boost_pred_ppm <- predict(best_boost_model_ppm, unemp_test_ppm)
+
+# MSE
+best_boost_mse_ppm <- mean((best_boost_pred_ppm - unemp_test_ppm$UNEMP_RATE)^2)
+best_boost_mse_ppm #2.825687
+
+# RMSE
+best_boost_rmse_ppm <- sqrt(mean((best_boost_pred_ppm - unemp_test_ppm$UNEMP_RATE)^2))
+best_boost_rmse_ppm #1.680978 
+```
+
+
+C.ii) SVM, Radial: Predictive Mean Matching imputation
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_ppm <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_ppm <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_ppm <- expand.grid(cost = rad_cost_values_ppm, gamma = rad_gamma_values_ppm)
+
+
+start_time_rad_ppm = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning for cost Aand radial SVM model. Fit the support vector classifier with 'scale = TRUE' for scaling.
+svm_rad_tune_ppm <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_ppm,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_ppm,
+                        scale = TRUE)
+
+end_time_rad_ppm = Sys.time()# End timer.
+runtime_rad_ppm = end_time_rad_ppm - start_time_rad_ppm # Calculate run time.
+print(runtime_rad_ppm) # Time difference of 15.73421 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_ppm) # Based on detailed performance results, cost = 3.35 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_ppm <- svm_rad_tune_ppm$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  3.1 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  107
+
+# Model
+rad_svm_ppm <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_ppm,
+                  kernel = "radial",
+                  cost = 3.1,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_ppm$index
+
+#View summary of svm model
+summary(rad_svm_ppm)
+#This tells us, for instance, that a linear kernel was used with cost = 3.1, gamma = 0.1, epsilon = 0.1 and that there were 107 support vectors.
+
+# Predict
+rad_pre_ppm <- predict(rad_svm_ppm, unemp_test_ppm)
+
+# MSE
+rad_mse_ppm <- mean((rad_pre_ppm - unemp_test_ppm$UNEMP_RATE)^2)
+rad_mse_ppm #4.282912
+
+# RMSE
+rad_rmse_ppm <- sqrt(mean((rad_pre_ppm - unemp_test_ppm$UNEMP_RATE)^2))
+rad_rmse_ppm #2.06952
+```
+
+MSE Predictive Mean Matching imputation Comparison
+```{r}
+Alg_Comparison_ppm = print(paste("Machine Learnign Algorithm Comparisons:", "Ridge Regression:", "MSE = ", ridge_mse_ppm,",", "RMSE = ", ridge_rmse_ppm,",", "Boosting:", "MSE =", boost_mse_ppm, ",", "RMSE =", boost_rmse_ppm, "SVM - Radial:", "MSE =", rad_mse_ppm, "RMSE =", rad_rmse_ppm))
+```
+
+
+A.iii) Ride Regression: Linear regression, predicted values imputation
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_lrpv <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_lrpv)[,-1]# All 7 predictors
+head(x_lrpv) # Scaling did not occur
+dim(x_lrpv) # 153   7
+
+y_lrpv <- unemp_train_lrpv$UNEMP_RATE # Response
+head(y_lrpv)
+length(y_lrpv) # 153
+
+# Fit original ridge regression model
+ridge_mod_lrpv <- glmnet(x = x_lrpv, 
+                       y = y_lrpv, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_lrpv, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_lrpv)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_lrpv <- cv.glmnet(x = x_lrpv,
+                         y = y_lrpv,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_lrpv)
+
+#View plot
+plot(cv_ridge_lrpv)
+
+#Determine best lambda value
+(best_lambda_ridge_lrpv = cv_ridge_lrpv$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_lrpv <- glmnet(x = x_lrpv,
+                            y = y_lrpv,
+                            lambda = best_lambda_ridge_lrpv,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_lrpv)
+
+# View coefficients
+coef(best_ridge_mod_lrpv)
+
+# Predict
+x1_lrpv <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_lrpv)[,-1]# All 7 predictors 
+head(x1_lrpv) # Scaling did not occur
+dim(x1_lrpv) #10   7
+
+ridge_pre_lrpv <- predict(best_ridge_mod_lrpv,
+                        newx = x1_lrpv, 
+                        alpha=0,
+                        s= best_lambda_ridge_lrpv)
+# View prediction
+ridge_pre_lrpv
+
+# Performance
+ridge_mse_lrpv = mean((ridge_pre_lrpv - unemp_test_lrpv$UNEMP_RATE) ^2)
+ridge_mse_lrpv #33.27483
+
+ridge_rmse_lrpv = sqrt(mean((ridge_pre_lrpv - unemp_test_lrpv$UNEMP_RATE) ^2))
+ridge_rmse_lrpv #5.768434
+```
+
+
+B.iii) Boosting: Linear regression, predicted values imputation
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_lrpv <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_lrpv, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_lrpv)
+boost_model_lrpv
+
+# Predict
+boost_pred_lrpv <- predict(boost_model_lrpv, unemp_test_lrpv)
+
+# MSE
+boost_mse_lrpv <- mean((boost_pred_lrpv - unemp_test_lrpv$UNEMP_RATE)^2)
+boost_mse_lrpv #2.623492
+
+# RMSE
+boost_rmse_lrpv <- sqrt(mean((boost_pred_lrpv - unemp_test_lrpv$UNEMP_RATE)^2))
+boost_rmse_lrpv #1.61972
+
+# Tuning parameters
+boost_grid_lrpv <-  expand.grid(interaction.depth = c(2,5,10,15),  # Max Tree Depth
+                        n.trees = (1:100), # Boosting Iterations
+                        shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                        n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                        )
+
+
+# Cross-validation
+fitControl_lrpv <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_lrpv <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_lrpv, 
+                             method = "gbm", 
+                             trControl = fitControl_lrpv, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_lrpv)
+
+# Best tuning parameters
+(best <- boost_grid_train_lrpv$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   95                10       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_lrpv <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_lrpv, 
+                           distribution = "gaussian", 
+                           n.trees = 95,
+                           interaction.depth = 10, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_lrpv)
+best_boost_model_lrpv
+
+# Predict
+best_boost_pred_lrpv <- predict(best_boost_model_lrpv, unemp_test_lrpv)
+
+# MSE
+best_boost_mse_lrpv <- mean((best_boost_pred_lrpv - unemp_test_lrpv$UNEMP_RATE)^2)
+best_boost_mse_lrpv #2.724237
+
+# RMSE
+best_boost_rmse_lrpv <- sqrt(mean((best_boost_pred_lrpv - unemp_test_lrpv$UNEMP_RATE)^2))
+best_boost_rmse_lrpv #1.650526 
+```
+
+
+C.iii) SVM, Radial: Linear regression, predicted values imputation
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_lrpv <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_lrpv <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_lrpv <- expand.grid(cost = rad_cost_values_lrpv, gamma = rad_gamma_values_lrpv)
+
+
+start_time_rad_lrpv = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning for cost Aand radial SVM model. Fit the support vector classifier with 'scale = TRUE' for scaling.
+svm_rad_tune_lrpv <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_lrpv,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_lrpv,
+                        scale = TRUE)
+
+end_time_rad_lrpv = Sys.time()# End timer.
+runtime_rad_lrpv = end_time_rad_lrpv - start_time_rad_lrpv # Calculate run time.
+print(runtime_rad_lrpv) # Time difference of 6.549102 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_lrpv) # Based on detailed performance results, cost = 3.35 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_lrpv <- svm_rad_tune_lrpv$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  3.5 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  107
+
+# Model
+rad_svm_lrpv <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_lrpv,
+                  kernel = "radial",
+                  cost = 3.5,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_lrpv$index
+
+#View summary of svm model
+summary(rad_svm_lrpv)
+#This tells us, for instance, that a linear kernel was used with cost = 3.35, gamma = 0.1, epsilon = 0.1 and that there were 107 support vectors.
+
+# Predict
+rad_pre_lrpv <- predict(rad_svm_lrpv, unemp_test_lrpv)
+
+# MSE
+rad_mse_lrpv <- mean((rad_pre_lrpv - unemp_test_lrpv$UNEMP_RATE)^2)
+rad_mse_lrpv #3.947949
+
+# RMSE
+rad_rmse_lrpv <- sqrt(mean((rad_pre_lrpv - unemp_test_lrpv$UNEMP_RATE)^2))
+rad_rmse_lrpv #1.986945
+```
+
+MSE Linear regression, predicted values Comparison
+```{r}
+Alg_Comparison_lrpv = print(paste("Machine Learnign Algorithm Comparisons:", "Ridge Regression:", "MSE = ", ridge_mse_lrpv,",", "RMSE = ", ridge_rmse_lrpv,",", "Boosting:", "MSE =", boost_mse_lrpv, ",", "RMSE =", boost_rmse_lrpv, "SVM - Radial:", "MSE =", rad_mse_lrpv, "RMSE =", rad_rmse_lrpv))
+```
+
+
+A.iv) Ride Regression: Linear regression, with bootstrapping imputation
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_lrb <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_lrb)[,-1]# All 7 predictors
+head(x_lrb) # Scaling did not occur
+dim(x_lrb) # 153   7
+
+y_lrb <- unemp_train_lrb$UNEMP_RATE # Response
+head(y_lrb)
+length(y_lrb) # 153
+
+# Fit original ridge regression model
+ridge_mod_lrb <- glmnet(x = x_lrb, 
+                       y = y_lrb, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_lrb, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_lrb)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_lrb <- cv.glmnet(x = x_lrb,
+                         y = y_lrb,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_lrb)
+
+#View plot
+plot(cv_ridge_lrb)
+
+#Determine best lambda value
+(best_lambda_ridge_lrb = cv_ridge_lrb$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_lrb <- glmnet(x = x_lrb,
+                            y = y_lrb,
+                            lambda = best_lambda_ridge_lrb,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_lrb)
+
+# View coefficients
+coef(best_ridge_mod_lrb)
+
+# Predict
+x1_lrb <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_lrb)[,-1]# All 7 predictors 
+head(x1_lrb) # Scaling did not occur
+dim(x1_lrb) #10   7
+
+ridge_pre_lrb <- predict(best_ridge_mod_lrb,
+                        newx = x1_lrb, 
+                        alpha=0,
+                        s= best_lambda_ridge_lrb)
+# View prediction
+ridge_pre_lrb
+
+# Performance
+ridge_mse_lrb = mean((ridge_pre_lrb - unemp_test_lrb$UNEMP_RATE) ^2)
+ridge_mse_lrb #30.80063
+
+ridge_rmse_lrb = sqrt(mean((ridge_pre_lrb - unemp_test_lrb$UNEMP_RATE) ^2))
+ridge_rmse_lrb #5.549832
+```
+
+
+B.iv) Boosting: Linear regression, with bootstrapping imputation
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_lrb <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_lrb, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_lrb)
+boost_model_lrb
+
+# Predict
+boost_pred_lrb <- predict(boost_model_lrb, unemp_test_lrb)
+
+# MSE
+boost_mse_lrb <- mean((boost_pred_lrb - unemp_test_lrb$UNEMP_RATE)^2)
+boost_mse_lrb #2.894975
+
+# RMSE
+boost_rmse_lrb <- sqrt(mean((boost_pred_lrb - unemp_test_lrb$UNEMP_RATE)^2))
+boost_rmse_lrb #1.701463
+
+# Tuning parameters
+boost_grid_lrb <-  expand.grid(interaction.depth = c(2,5,10,15),  # Max Tree Depth
+                               n.trees = (1:100), # Boosting Iterations
+                               shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                               n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                               )
+
+
+# Cross-validation
+fitControl_lrb <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_lrb <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_lrb, 
+                             method = "gbm", 
+                             trControl = fitControl_lrb, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_lrb)
+
+# Best tuning parameters
+(best <- boost_grid_train_lrb$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   94                10       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_lrb <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_lrb, 
+                           distribution = "gaussian", 
+                           n.trees = 94,
+                           interaction.depth = 10, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_lrb)
+best_boost_model_lrb
+
+# Predict
+best_boost_pred_lrb <- predict(best_boost_model_lrb, unemp_test_lrb)
+
+# MSE
+best_boost_mse_lrb <- mean((best_boost_pred_lrb - unemp_test_lrb$UNEMP_RATE)^2)
+best_boost_mse_lrb #2.900562
+
+# RMSE
+best_boost_rmse_lrb <- sqrt(mean((best_boost_pred_lrb - unemp_test_lrb$UNEMP_RATE)^2))
+best_boost_rmse_lrb #1.703104 
+```
+
+
+C.iv) SVM, Radial: Linear regression, with bootstrapping imputation
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_lrb <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_lrb <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_lrb <- expand.grid(cost = rad_cost_values_lrb, gamma = rad_gamma_values_lrb)
+
+
+start_time_rad_lrb = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning for cost Aand radial SVM model. Fit the support vector classifier with 'scale = TRUE' for scaling.
+svm_rad_tune_lrb <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_lrb,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_lrb,
+                        scale = TRUE)
+
+end_time_rad_lrb = Sys.time()# End timer.
+runtime_rad_lrb = end_time_rad_lrb - start_time_rad_lrb # Calculate run time.
+print(runtime_rad_lrb) # Time difference of 6.549102 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_lrb) # Based on detailed performance results, cost = 3.35 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_lrb <- svm_rad_tune_lrb$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  3.35 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  107
+
+# Model
+rad_svm_lrb <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_lrb,
+                  kernel = "radial",
+                  cost = 3.35,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_lrb$index
+
+#View summary of svm model
+summary(rad_svm_lrb)
+#This tells us, for instance, that a linear kernel was used with cost = 3.35, gamma = 0.1, epsilon = 0.1 and that there were 107 support vectors.
+
+# Predict
+rad_pre_lrb <- predict(rad_svm_lrb, unemp_test_lrb)
+
+# MSE
+rad_mse_lrb <- mean((rad_pre_lrb - unemp_test_lrb$UNEMP_RATE)^2)
+rad_mse_lrb #4.292778
+
+# RMSE
+rad_rmse_lrb <- sqrt(mean((rad_pre_lrb - unemp_test_lrb$UNEMP_RATE)^2))
+rad_rmse_lrb #2.071902
+```
+
+MSE Linear regression, with bootstrapping imputation Comparison
+```{r}
+Alg_Comparison_lrb = print(paste("Machine Learnign Algorithm Comparisons:", "Ridge Regression:", "MSE = ", ridge_mse_lrb,",", "RMSE = ", ridge_rmse_lrb,",", "Boosting:", "MSE =", boost_mse_lrb, ",", "RMSE =", boost_rmse_lrb, "SVM - Radial:", "MSE =", rad_mse_lrb, "RMSE =", rad_rmse_lrb))
+```
+
+
+A.v) Ride Regression: Random Sampling imputation
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_rs <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_rs)[,-1]# All 7 predictors
+head(x_rs) # Scaling did not occur
+dim(x_rs) # 153   7
+
+y_rs <- unemp_train_lrb$UNEMP_RATE # Response
+head(y_rs)
+length(y_rs) # 153
+
+# Fit original ridge regression model
+ridge_mod_rs <- glmnet(x = x_rs, 
+                       y = y_rs, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_rs, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_rs)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_rs <- cv.glmnet(x = x_rs,
+                         y = y_rs,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_rs)
+
+#View plot
+plot(cv_ridge_rs)
+
+#Determine best lambda value
+(best_lambda_ridge_rs = cv_ridge_rs$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_rs <- glmnet(x = x_rs,
+                            y = y_rs,
+                            lambda = best_lambda_ridge_rs,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_rs)
+
+# View coefficients
+coef(best_ridge_mod_rs)
+
+# Predict
+x1_rs <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_rs)[,-1]# All 7 predictors 
+head(x1_rs) # Scaling did not occur
+dim(x1_rs) #10   7
+
+ridge_pre_rs <- predict(best_ridge_mod_rs,
+                        newx = x1_rs, 
+                        alpha=0,
+                        s= best_lambda_ridge_rs)
+# View prediction
+ridge_pre_rs
+
+# Performance
+ridge_mse_rs = mean((ridge_pre_rs - unemp_test_rs$UNEMP_RATE) ^2)
+ridge_mse_rs #18.47223
+
+ridge_rmse_rs = sqrt(mean((ridge_pre_rs - unemp_test_rs$UNEMP_RATE) ^2))
+ridge_rmse_rs #4.297933
+```
+
+
+B.v) Boosting: Random Sampling imputation
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_rs <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_rs, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_rs)
+boost_model_rs
+
+# Predict
+boost_pred_rs <- predict(boost_model_rs, unemp_test_rs)
+
+# MSE
+boost_mse_rs <- mean((boost_pred_rs - unemp_test_rs$UNEMP_RATE)^2)
+boost_mse_rs #3.018164
+
+# RMSE
+boost_rmse_rs <- sqrt(mean((boost_pred_rs - unemp_test_rs$UNEMP_RATE)^2))
+boost_rmse_rs #1.737286
+
+# Tuning parameters
+boost_grid_rs <-  expand.grid(interaction.depth = (1:30),  # Max Tree Depth
+                        n.trees = (1:200), # Boosting Iterations
+                        shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                        n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                        )
+
+
+# Cross-validation
+fitControl_rs <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_rs <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_rs, 
+                             method = "gbm", 
+                             trControl = fitControl_rs, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_rs)
+
+# Best tuning parameters
+(best <- boost_grid_train_rs$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   199                13       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_rs <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_rs, 
+                           distribution = "gaussian", 
+                           n.trees = 199,
+                           interaction.depth = 13, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_rs)
+best_boost_model_rs
+
+# Predict
+best_boost_pred_rs <- predict(best_boost_model_rs, unemp_test_rs)
+
+# MSE
+best_boost_mse_rs <- mean((best_boost_pred_rs - unemp_test_rs$UNEMP_RATE)^2)
+best_boost_mse_rs #3.54704
+
+# RMSE
+best_boost_rmse_rs <- sqrt(mean((best_boost_pred_rs - unemp_test_rs$UNEMP_RATE)^2))
+best_boost_rmse_rs #1.883359 
+```
+
+
+C.v) SVM, Radial: Random Sampling imputation
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_rs <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_rs <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_rs <- expand.grid(cost = rad_cost_values_rs, gamma = rad_gamma_values_rs)
+
+
+start_time_rad_rs = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning for cost Aand radial SVM model. Fit the support vector classifier with 'scale = TRUE' for scaling.
+svm_rad_tune_rs <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_rs,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_rs,
+                        scale = TRUE)
+
+end_time_rad_rs = Sys.time()# End timer.
+runtime_rad_rs = end_time_rad_rs - start_time_rad_rs # Calculate run time.
+print(runtime_rad_rs) # Time difference of 6.549102 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_rs) # Based on detailed performance results, cost = 4.85 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_rs <- svm_rad_tune_rs$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  4.85 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  113
+
+# Model
+rad_svm_rs <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_rs,
+                  kernel = "radial",
+                  cost = 4.85,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_rs$index
+
+#View summary of svm model
+summary(rad_svm_rs)
+#This tells us, for instance, that a linear kernel was used with cost = 3.35, gamma = 0.1, epsilon = 0.1 and that there were 107 support vectors.
+
+# Predict
+rad_pre_rs <- predict(rad_svm_rs, unemp_test_rs)
+
+# MSE
+rad_mse_rs <- mean((rad_pre_rs - unemp_test_rs$UNEMP_RATE)^2)
+rad_mse_rs #3.986829
+
+# RMSE
+rad_rmse_rs <- sqrt(mean((rad_pre_rs - unemp_test_rs$UNEMP_RATE)^2))
+rad_rmse_rs #1.996704
+```
+
+MSE Random Sampling imputation Comparison
+```{r}
+Alg_Comparison_rs = print(paste("Machine Learnign Algorithm Comparisons:", "Ridge Regression:", "MSE = ", ridge_mse_rs,",", "RMSE = ", ridge_rmse_rs,",", "Boosting:", "MSE =", boost_mse_rs, ",", "RMSE =", boost_rmse_rs, "SVM - Radial:", "MSE =", rad_mse_rs, "RMSE =", rad_rmse_rs))
+```
+
+
+A.vi) Ride Regression: Median imputation
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_med <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_med)[,-1]# All 7 predictors
+head(x_med) # Scaling did not occur
+dim(x_med) # 153   7
+
+y_med <- unemp_train_med$UNEMP_RATE # Response
+head(y_med)
+length(y_med) # 153
+
+# Fit original ridge regression model
+ridge_mod_med <- glmnet(x = x_med, 
+                       y = y_med, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_med, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_med)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_med <- cv.glmnet(x = x_med,
+                         y = y_med,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_med)
+
+#View plot
+plot(cv_ridge_med)
+
+#Determine best lambda value
+(best_lambda_ridge_med = cv_ridge_med$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_med <- glmnet(x = x_med,
+                            y = y_med,
+                            lambda = best_lambda_ridge_med,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_med)
+
+# View coefficients
+coef(best_ridge_mod_med)
+
+# Predict
+x1_med <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_med)[,-1]# All 7 predictors 
+head(x1_med) # Scaling did not occur
+dim(x1_med) #10   7
+
+ridge_pre_med <- predict(best_ridge_mod_med,
+                        newx = x1_med, 
+                        alpha=0,
+                        s= best_lambda_ridge_med)
+# View prediction
+ridge_pre_med
+
+# Performance
+ridge_mse_med = mean((ridge_pre_med - unemp_test_med$UNEMP_RATE) ^2)
+ridge_mse_med #54.37524
+
+ridge_rmse_med = sqrt(mean((ridge_pre_med - unemp_test_med$UNEMP_RATE) ^2))
+ridge_rmse_med #7.373957
+```
+
+
+B.vi) Boosting: Median imputation
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_med <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_med, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_med)
+boost_model_med
+
+# Predict
+boost_pred_med <- predict(boost_model_med, unemp_test_med)
+
+# MSE
+boost_mse_med <- mean((boost_pred_med - unemp_test_med$UNEMP_RATE)^2)
+boost_mse_med #2.501521
+
+# RMSE
+boost_rmse_med <- sqrt(mean((boost_pred_med - unemp_test_med$UNEMP_RATE)^2))
+boost_rmse_med #1.58162
+
+# Tuning parameters
+boost_grid_med <-  expand.grid(interaction.depth = c(2,5,10,15),  # Max Tree Depth
+                        n.trees = (1:100), # Boosting Iterations
+                        shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                        n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                        )
+
+
+# Cross-validation
+fitControl_med <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_med <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_med, 
+                             method = "gbm", 
+                             trControl = fitControl_med, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_med)
+
+# Best tuning parameters
+(best <- boost_grid_train_med$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   82                10       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_med <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_med, 
+                           distribution = "gaussian", 
+                           n.trees = 82,
+                           interaction.depth = 10, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_med)
+best_boost_model_med
+
+# Predict
+best_boost_pred_med <- predict(best_boost_model_med, unemp_test_med)
+
+# MSE
+best_boost_mse_med <- mean((best_boost_pred_med - unemp_test_med$UNEMP_RATE)^2)
+best_boost_mse_med #2.699348
+
+# RMSE
+best_boost_rmse_med <- sqrt(mean((best_boost_pred_med - unemp_test_med$UNEMP_RATE)^2))
+best_boost_rmse_med #1.642969 
+```
+
+
+C.vi) SVM, Radial: Median imputation
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_med <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_med <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_med <- expand.grid(cost = rad_cost_values_med, gamma = rad_gamma_values_med)
+
+
+start_time_rad_med = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning for cost Aand radial SVM model. Fit the support vector classifier with 'scale = TRUE' for scaling.
+svm_rad_tune_med <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_med,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_med,
+                        scale = TRUE)
+
+end_time_rad_med = Sys.time()# End timer.
+runtime_rad_med = end_time_rad_med - start_time_rad_med # Calculate run time.
+print(runtime_rad_med) # Time difference of 6.549102 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_med) # Based on detailed performance results, cost = 3.35 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_med <- svm_rad_tune_med$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  4.10 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  108
+
+# Model
+rad_svm_med <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_med,
+                  kernel = "radial",
+                  cost = 4.1,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_med$index
+
+#View summary of svm model
+summary(rad_svm_med)
+#This tells us, for instance, that a linear kernel was used with cost = 4.1, gamma = 0.1, epsilon = 0.1 and that there were 108 support vectors.
+
+# Predict
+rad_pre_med <- predict(rad_svm_med, unemp_test_med)
+
+# MSE
+rad_mse_med <- mean((rad_pre_med - unemp_test_med$UNEMP_RATE)^2)
+rad_mse_med #3.00141
+
+# RMSE
+rad_rmse_med <- sqrt(mean((rad_pre_med - unemp_test_med$UNEMP_RATE)^2))
+rad_rmse_med #2.071902
+```
+
+MSE Median imputation Comparison
+```{r}
+Alg_Comparison_med = print(paste("Machine Learnign Algorithm Comparisons:", "Ridge Regression:", "MSE = ", ridge_mse_med,",", "RMSE = ", ridge_rmse_med,",", "Boosting:", "MSE =", boost_mse_med, ",", "RMSE =", boost_rmse_med, "SVM - Radial:", "MSE =", rad_mse_med, "RMSE =", rad_rmse_med))
+```
+
+After testing all datasets with the different approaches to imputation using Ridge regressino, Boosting and SVM Radial, Median imputation had the best performance for Boosting and SVM radial and Random Sample from observed values had the best performance for Ridge regression. Based on the results we will proceed with Median imputation for the rest of the assignment. 
+
+Provide an overview of the Australian unemployment rate over the training data period,
+and some insights on factors driving the unemployment rate 
+```{r}
+#_______________Visualization for chosen imputation dataset:_______________
+(all_train_var <- pairs.panels(unemp_train_med)) #view all variables from training dataset for comparison 
+
+# -----Unemployment Rate over time-----
+# Identify the highest and lowest unemployment rates
+high_unemply <- abs_unemply_med[abs_unemply_med$UNEMP_RATE == max(abs_unemply_med$UNEMP_RAT), ]
+low_unemply <- abs_unemply_med[abs_unemply_med$UNEMP_RATY == min(abs_unemply_med$UNEMP_RATE), ]
+
+# Local Max
+local_max <- abs_unemply_med[which(diff(sign(diff(abs_unemply_med$UNEMP_RATE))) == -2) + 1, ]
+# Pull specific local max
+local_max <- local_max[c(2,18,23,32,40,45),]
+
+# Local Min
+local_min <- abs_unemply_med[which(diff(sign(diff(abs_unemply_med$UNEMP_RATE))) == 2) + 1, ]
+
+# Pull specific local max
+local_min <- local_min[c(6,9,22,32,45,48),]
+
+#First data entry: December 1982
+(dec_1982 <- abs_unemply_med[1,]) # % 8.793362
+
+#Last data entry: September 2020
+(march_2023 <- abs_unemply_med[166,]) #  % 3.581322
+
+#Histogram of response
+hist(abs_unemply_med$UNEMP_RATE) #Slightly positive skewed.
+
+# ggplot
+ggplot(abs_unemply_med, aes(x = DATE, y = UNEMP_RATE)) +
+  geom_line(colour = "blue", size = 1.2) +
+  geom_text(data = high_unemply, aes(label = paste("Highest - ", DATE,": ", round(UNEMP_RATE,2),"%")), 
+            vjust = -0.5, hjust = 0.5, color = "red") +
+  geom_text(data = low_unemply, aes(label = paste("Lowest - ", DATE,": ", round(UNEMP_RATE,2),"%")), 
+            vjust = 1.5, hjust = 0.5, color = "#228B22") +
+  geom_text(data = local_max, aes(label = paste(DATE,":\n ", round(UNEMP_RATE,2),"%")), 
+            vjust = -0.5, hjust = 0.5, color = "red") +
+  geom_text(data = local_min, aes(label = paste(DATE,":\n", round(UNEMP_RATE,2),"%")), 
+            vjust = 1.5, hjust = 0.5, color = "#228B22") +
+   geom_text(data = dec_1982, aes(label = paste("Start\n", DATE,":\n", round(UNEMP_RATE,2),"%")), 
+          vjust = 5.6, hjust = 1, color = "black") +
+geom_text(data = march_2023, aes(label = paste("End\n", DATE,":\n", round(UNEMP_RATE,2),"%")), 
+          vjust = -0.2, hjust = 0.08, color = "black") +
+  labs(title = "Unemployment Rate in Australia from 1982 to 2020", x = "Time frame (years): 1982 - 2020", y = "Unemployment Rate (%)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# -----Job Vacancies over time-----
+# Identify the highest and lowest unemployment rates
+high_jv <- abs_unemply_med[abs_unemply_med$JOB_VACAN == max(abs_unemply_med$JOB_VACAN), ]
+low_jv <- abs_unemply_med[abs_unemply_med$JOB_VACAN == min(abs_unemply_med$JOB_VACAN), ]
+
+# ggplot
+ggplot(abs_unemply_med, aes(x = DATE, y = JOB_VACAN)) +
+  geom_line(colour = "blue", size = 1.2) +
+  geom_text(data = high_jv, aes(label = paste(DATE,": ", round(JOB_VACAN, 2))), 
+            vjust = -0.5, hjust = 0.5, color = "red") +
+  geom_text(data = low_jv, aes(label = paste(DATE,": ", round(JOB_VACAN, 2))), 
+            vjust = 1.5, hjust = 0.5, color = "#228B22") +
+  labs(title = "Job Vacancies in Australia from 1982 to 2023", x = "Time frame (years): 1982 - 2020", y = "Job Vacancies (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# -----Estimated Resident Population over time-----
+# Identify the highest and lowest unemployment rates
+high_erp <- abs_unemply_med[abs_unemply_med$RES_POP == max(abs_unemply_med$RES_POP), ]
+low_erp <- abs_unemply_med[abs_unemply_med$RES_POP == min(abs_unemply_med$RES_POP), ]
+
+#ggplot
+ggplot(abs_unemply_med, aes(x = DATE, y = RES_POP)) +
+  geom_line(colour = "blue", size = 1.2) +
+  geom_text(data = high_erp, aes(label = paste(DATE,": ", round(RES_POP,2))), 
+            vjust = -0.5, hjust = 0.5, color = "red") +
+  geom_text(data = low_erp, aes(label = paste(DATE,": ", round(RES_POP,2))), 
+            vjust = 1.5, hjust = 0.5, color = "#228B22") +
+  labs(title = "Estimated Resident Population in Australia from 1982 to 2023", x = "Time frame (years): 1982 - 2020", y = "Estimated Resident Population (thousands)") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# -----Unemployment Rate vs. Term of trade index(%)-----
+#ggplot - scatter plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = TTI)) +
+  geom_point(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Term of trade index (%) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "Term of trade index(%)")
+
+#ggplot - smooth line plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = TTI)) +
+  geom_smooth(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Term of trade index (%) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "Term of trade index(%)")
+
+
+# -----Unemployment Rate vs. Consumer Price Index of all groups (CPI)-----
+#ggplot - scatter plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = CPI)) +
+  geom_point(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Consumer Price Index of all groups (CPI) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "CPI")
+
+#ggplot - smooth line plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = CPI)) +
+  geom_smooth(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Consumer Price Index of all groups (CPI) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "CPI")
+
+
+# -----Unemployment Rate vs. Number of Job Vacancies(thousands)-----
+#ggplot - scatter plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = JOB_VACAN)) +
+  geom_point(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Number of Job Vacancies(thousands) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "Number of Job Vacancies(thousands)")
+
+#ggplot - smooth line plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = JOB_VACAN)) +
+  geom_smooth(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Number of Job Vacancies(thousands) in Australia from 1983 to 2020", x = "Unemployment Rate (%)", y =  "Number of Job Vacancies(thousands)")
+
+
+# -----Unemployment Rate vs. Estimated Resident Population(thousands)-----
+#ggplot - scatter plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = RES_POP)) +
+  geom_point(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Estimated Resident Population(thousands) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "Estimated Resident Population(thousands)")
+
+#ggplot - smooth line plot
+ggplot(unemp_train_med, aes(x = UNEMP_RATE, y = RES_POP)) +
+  geom_smooth(colour = "blue", size = 1.2) +
+  labs(title = "Unemployment Rate vs. Estimated Resident Population(thousands) in Australia from 1982 to 2020", x = "Unemployment Rate (%)", y =  "Estimated Resident Population(thousands)")
+```
+
+
+Conduct Machine Learning algorithms: Ridge Regression, Lasso Regression, Decision Trees: CARTs, Bagging, Random Forest, and Boosting, Support Vector Machines: linear, radial, and polynomial. 
+
+A. Ride Regression: Median 
+```{r}
+#__________Ride Regression__________
+# model.matrix():
+   #   organises the predictors in a matrix
+   #   standardizes the predictors- removes scale and mean set to 0.
+
+x_med <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_med)[,-1]# All 7 predictors
+head(x_med) # Scaling did not occur
+dim(x_med) # 153   7
+
+y_med <- unemp_train_med$UNEMP_RATE # Response
+head(y_med)
+length(y_med) # 153
+
+# Fit original ridge regression model
+ridge_mod_med <- glmnet(x = x_med, 
+                       y = y_med, 
+                       alpha = 0, 
+                       standardize = T)
+
+# Produce Ridge trace plot
+plot(ridge_mod_med, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+#view summary of model
+summary(ridge_mod_med)
+
+# Create grid of possible lambda values
+grid <- 10^ seq (10 , -2, length = 100)
+# Variable grid contains a sequence of numbers ranging from 10^10 to 10^-2, with a total of 100 elements
+
+# Choosing lambda using cross-validation
+# Choose lambda with least Cross-validation error
+cv_ridge_med <- cv.glmnet(x = x_med,
+                         y = y_med,
+                         alpha = 0, # Ridge Regression
+                         lambda = grid) # Does a 10-fold cross validation by default
+
+#View model
+summary(cv_ridge_med)
+
+#View plot
+plot(cv_ridge_med)
+
+#Determine best lambda value
+(best_lambda_ridge_med = cv_ridge_med$lambda.min) #0.01
+
+set.seed(1234)
+
+# Model
+best_ridge_mod_med <- glmnet(x = x_med,
+                            y = y_med,
+                            lambda = best_lambda_ridge_med,
+                            alpha = 0, # Ridge regression
+                            standardize = T)
+
+# View model summary
+summary(best_ridge_mod_med)
+
+# View coefficients
+coef(best_ridge_mod_med)
+
+
+# Performance on training data
+# Predict
+ridge_pre_med_training <- predict(best_ridge_mod_med,
+                         newx = x_med, 
+                         alpha=0,
+                         s= best_lambda_ridge_med)
+
+# View prediction 
+ridge_pre_med_training
+
+# Performance
+ridge_mse_med_training = mean((ridge_pre_med_training - unemp_train_med$UNEMP_RATE) ^2)
+ridge_mse_med_training # 0.9232598
+
+ridge_rmse_med_training = sqrt(mean((ridge_pre_med_training - unemp_train_med$UNEMP_RATE) ^2))
+ridge_rmse_med # 0.9608641
+
+#MAE
+(ride_train_mae = postResample(pred = ridge_pre_med_training, unemp_train_med$UNEMP_RATE))
+#     RMSE      Rsquared       MAE 
+#  0.9608641   0.7174136   0.7242866 
+
+# Performance on test data
+x1_med <- model.matrix(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_test_med)[,-1]# All 7 predictors 
+head(x1_med) # Scaling did not occur
+dim(x1_med) #10   7
+
+# Predict
+ridge_pre_med <- predict(best_ridge_mod_med,
+                         newx = x1_med, 
+                         alpha=0,
+                         s= best_lambda_ridge_med)
+
+# View prediction 
+ridge_pre_med
+
+# Performance
+ridge_mse_med = mean((ridge_pre_med - unemp_test_med$UNEMP_RATE) ^2)
+ridge_mse_med #54.37524
+
+ridge_rmse_med = sqrt(mean((ridge_pre_med - unemp_test_med$UNEMP_RATE) ^2))
+ridge_rmse_med #7.373957
+
+#MAE
+(ridge_test_mae = postResample(pred = ridge_pre_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  7.3739567  0.6689802   6.5583333 
+```
+
+
+B. Lasso Regression: Median
+```{r}
+# Fit original lasso regression model
+lasso_mod_med <- glmnet(x = x_med,
+                        y = y_med,
+                        alpha = 1,
+                        standardize = T)
+
+# View summary of model
+summary(lasso_mod_med)
+
+# Produce Ridge trace plot
+plot(lasso_mod_med, xvar = "lambda")
+# We can visualize how the coefficient estimates changed as a result of increasing lambda.
+
+# Perform k-fold cross-validation to find optimal lambda value
+set.seed(1234)
+cv_lasso_med <- cv.glmnet(x=x_med,
+                          y=y_med,
+                          alpha = 1,
+                          lambda = grid)
+
+# Produce plot of test MSE by lambda value
+plot(cv_lasso_med) 
+
+# Find optimal lambda value that minimizes test MSE
+best_lambda_lasso_med <- cv_lasso_med$lambda.min
+best_lambda_lasso_med #0.01
+
+set.seed(1234)
+
+# Model
+best_lasso_mod_med <- glmnet(x = x_med,
+                             y = y_med,
+                             lambda = best_lambda_lasso_med,
+                             alpha = 1, # Lasso regression
+                             standardize = T)
+
+# View model summary
+summary(best_lasso_mod_med)
+
+# View coefficients
+coef(best_lasso_mod_med)
+
+# Performance on training
+lasso_pre_med_training <- predict(best_lasso_mod_med,
+                         newx = x_med,
+                         alpha=1,
+                         s= best_lambda_lasso_med)
+
+# View prediction
+lasso_pre_med_training
+
+# MSE
+lasso_mse_med_training <- mean((lasso_pre_med_training - unemp_train_med$UNEMP_RATE) ^2)
+lasso_mse_med_training # 0.8923082
+
+# RMSE
+lasso_rmse_med_training <- sqrt(mean((lasso_pre_med_training - unemp_train_med$UNEMP_RATE) ^2))
+lasso_rmse_med_training # 0.9446207
+
+#MAE
+(lasso_train_mae = postResample(pred = lasso_pre_med_training, unemp_train_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  0.9446207  0.7268324   0.7115284
+
+# Performance on test data
+lasso_pre_med <- predict(best_lasso_mod_med,
+                         newx = x1_med,
+                         alpha=1,
+                         s= best_lambda_lasso_med)
+
+# View prediction
+lasso_pre_med
+
+# MSE
+lasso_mse_med <- mean((lasso_pre_med - unemp_test_med$UNEMP_RATE) ^2)
+lasso_mse_med # 66.84043
+
+# RMSE
+lasso_rmse_med <- sqrt(mean((lasso_pre_med - unemp_test_med$UNEMP_RATE) ^2))
+lasso_rmse_med # 8.1756
+
+#MAE
+(lasso_test_mae = postResample(pred = lasso_pre_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  8.1755995  0.6225268    7.1065695 
+```
+
+
+C. CARTs: Median
+```{r}
+#-----CART-----
+# Ensure the same results
+set.seed(1234)
+
+# Model
+CART_model_med <- rpart(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, data = unemp_train_med)
+
+# Summary
+summary(CART_model_med)
+CART_model_med
+
+# Visulisation of tree
+par(xpd = TRUE)
+rpart.plot(CART_model_med)
+
+# Variable importance
+CART_vi_med <- barplot(CART_model_med$variable.importance, col = "blue")
+
+# Predict
+CART_pre_med <- predict(CART_model_med, unemp_test_med)
+
+# MSE
+mse_med <- mean((CART_pre_med - unemp_test_med$UNEMP_RATE)^2)
+mse_med #2.950931
+
+# Parameters: CP
+plotcp(CART_model_med)
+# Based on the graph, I would choose the cp value of 0.019. This is because it is the closest cp value to the critical value, which is the point where the cross-validation error starts to increase again. The critical value is important because it marks the point where the model is starting to overfit the data. By choosing a cp value that is close to the critical value, we can avoid overfitting and get a model that is more likely to generalize well to new data.
+
+# Another way to choose a cp value is to look for the point on the graph where the cross-validation error is the lowest. However, in this case, the cross-validation error is decreasing monotonically with tree size, so there is no clear minimum. This suggests that the model is not overfitting the data, so we can safely choose a cp value that is closer to the root of the tree, such as 0.019.
+
+# Prune
+CART_tree_prune_med <- prune(CART_model_med, cp = 0.019)
+
+# Visualization
+rpart.plot(CART_tree_prune_med)
+
+# Variable importance before and after prining
+par(mfrow = c(1,2), mar = c(10, 4.4, 4.1, 1.9))
+
+CART_prun_vi_med = barplot(CART_tree_prune_med$variable.importance, col = "blue", main = "CARTs: Post-pruning", las = 2)
+
+CART_vi_med = barplot(CART_model_med$variable.importance, col = "orange", main = "CARTs: Pre-pruning", las = 2)
+
+par(mfrow = c(1,1), mar = c(4.1, 4.4, 4.1, 1.9))
+
+# Performance on training
+CART_tree_pre_med_train <- predict(CART_tree_prune_med, unemp_train_med)
+
+# MSE
+CART_mse_med_train <-mean((CART_tree_pre_med_train - unemp_train_med$UNEMP_RATE)^2)
+CART_mse_med_train #0.3087844
+
+# RMSE
+CART_rmse_med_train <-  sqrt(mean((CART_tree_pre_med_train - unemp_train_med$UNEMP_RATE)^2))
+CART_rmse_med_train #0.5556837
+
+#MAE
+(CART_TRAIN_MAE = postResample(pred = CART_tree_pre_med_train, unemp_train_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  0.5556837  0.9050673    0.4198687 
+
+# Performance on test data
+CART_tree_pre_med <- predict(CART_tree_prune_med, unemp_test_med)
+
+# MSE
+CART_mse_med <-mean((CART_tree_pre_med - unemp_test_med$UNEMP_RATE)^2)
+CART_mse_med #1.901695
+
+# RMSE
+CART_rmse_med <-  sqrt(mean((CART_tree_pre_med - unemp_test_med$UNEMP_RATE)^2))
+CART_rmse_med #1.37902
+
+#MAE
+(CART_test_mae = postResample(pred = CART_tree_pre_med, unemp_test_med$UNEMP_RATE))
+#   RMSE     Rsquared      MAE 
+#  1.379020        NA   1.239968 
+```
+
+
+D. Bagging: Median
+```{r}
+#-----Bagging-----
+set.seed(1234)
+
+# Model
+bag_model_med <- randomForest(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                              data = unemp_train_med, 
+                              mtry = 7, # Use all predictors for bagging
+                              importance = TRUE)
+
+# Summary
+summary(bag_model_med)
+bag_model_med
+
+# Plot
+plot(bag_model_med) 
+abline(v= 61, col = "red") # Lowest point is around ntree=61.
+
+# Variable importance
+(bg_var_imp_med <- varImpPlot(bag_model_med, scale = FALSE))
+
+# Predict
+bag_pred_med <- predict(bag_model_med, unemp_test_med)
+
+# MSE
+bag_mse_med <- mean((bag_pred_med - unemp_test_med$UNEMP_RATE)^2)
+bag_mse_med #4.72919
+
+# Run again with ntree = 61
+set.seed(1234)
+
+# Model
+bag_model_med_61 <- randomForest(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                                 data = unemp_train_med, 
+                                 mtry = 7, # Use all predictors for bagging
+                                 ntree = 61,
+                                 importance = TRUE)
+
+# Summary
+summary(bag_model_med_61)
+bag_model_med_61
+
+# Variable importance
+(bg_var_imp_med_61 <- varImpPlot(bag_model_med_61, scale = FALSE))
+
+
+# Predict on train
+bag_pred_bag_med_61_train <- predict(bag_model_med_61, unemp_train_med)
+
+# MSE
+mse_bagging_med_61_train <- mean((bag_pred_bag_med_61_train - unemp_train_med$UNEMP_RATE)^2)
+mse_bagging_med_61_train # 0.03185838
+
+# RMSE
+mse_bagging_med_61_train <- sqrt(mean((bag_pred_bag_med_61_train - unemp_train_med$UNEMP_RATE)^2))
+mse_bagging_med_61_train # 0.1784892 
+
+
+# Predict on test 
+bag_pred_bag_med_61 <- predict(bag_model_med_61, unemp_test_med)
+
+# MSE
+mse_bagging_med_61 <- mean((bag_pred_bag_med_61 - unemp_test_med$UNEMP_RATE)^2)
+mse_bagging_med_61 # 4.543146
+
+# RMSE
+mse_bagging_med_61 <- sqrt(mean((bag_pred_bag_med_61 - unemp_test_med$UNEMP_RATE)^2))
+mse_bagging_med_61 # 2.131466 
+
+#-----Bagging with boostrap-----
+
+# Define the number of bootstrapped samples
+B <- 100
+
+# Initialize a list to store bagged models
+bag_boot_models_med <- list()
+
+# Set seed for reproducibility
+set.seed(1234)
+
+# Loop for bootstrapping
+for (i in 1:B) {
+  # Generate a bootstrap sample
+  boot_sample_med <- sample(nrow(unemp_train_med), replace = TRUE)
+  
+  # Train a model on the bootstrap sample
+  bag_boot_model_med <- randomForest(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                                    data = unemp_train_rs[boot_sample_med, ], 
+                                    mtry = 7,
+                                    ntree = 61,
+                                    importance = TRUE)
+  
+  # Store the model in the list
+  bag_boot_models_med[[i]] <- bag_boot_model_med
+}
+
+
+# Combine predictions from all bagged models for train
+bag_boot_pred_med_train <- numeric(nrow(unemp_train_med))
+for (i in 1:B) {
+  bag_boot_pred_med_train <- bag_boot_pred_med_train + predict(bag_boot_models_med[[i]], unemp_train_med)
+}
+bag_boot_pred_med_train <- bag_boot_pred_med_train / B
+
+# MSE
+bag_boot_mse_med_train <- mean((bag_boot_pred_med_train - unemp_train_med$UNEMP_RATE)^2)
+bag_boot_mse_med_train # 0.07827151
+
+# RMSE
+bag_boot_rmse_med_train <- sqrt(mean((bag_boot_pred_med_train - unemp_train_med$UNEMP_RATE)^2))
+bag_boot_rmse_med_train # 0.2797705  
+
+#MAE
+(bag_boot_train_mae = postResample(pred = bag_boot_pred_med_train, unemp_train_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  0.2797705  0.9774491    0.1830031
+
+# Combine predictions from all bagged models for test
+bag_boot_pred_med <- numeric(nrow(unemp_test_med))
+for (i in 1:B) {
+  bag_boot_pred_med <- bag_boot_pred_med + predict(bag_boot_models_med[[i]], unemp_test_med)
+}
+bag_boot_pred_med <- bag_boot_pred_med / B
+
+# MSE
+bag_boot_mse_med <- mean((bag_boot_pred_med - unemp_test_med$UNEMP_RATE)^2)
+bag_boot_mse_med # 3.748449
+
+# RMSE
+bag_boot_rmse_med <- sqrt(mean((bag_boot_pred_med - unemp_test_med$UNEMP_RATE)^2))
+bag_boot_rmse_med # 1.936091  
+
+#MAE
+(bag_boot_test_mae = postResample(pred = bag_boot_pred_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  1.9360913  0.2484545    1.7991926 
+```
+
+
+E. Random Forest: Median
+```{r}
+#-----Random Forest-----
+set.seed(1234)
+
+# Model
+rf_model_med <- randomForest(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_med, 
+                             mtry = sqrt(7), # Use square root of all predictors for random forest
+                             importance = TRUE)
+
+# Summary
+summary(rf_model_med)
+rf_model_med
+
+# Variable importance
+(bg_var_imp_med <- varImpPlot(rf_model_med, scale = FALSE))
+
+
+# Performance on train data
+rf_pred_med_train <- predict(rf_model_med, unemp_train_med)
+
+# MSE
+mse_rf_med_train <- mean((rf_pred_med_train - unemp_train_med$UNEMP_RATE)^2)
+mse_rf_med_train # 0.03002241
+
+# RMSE
+mse_rf_med_train <- sqrt(mean((rf_pred_med_train - unemp_train_med$UNEMP_RATE)^2))
+mse_rf_med_train # 0.1732698
+
+
+# Performance on test data
+rf_pred_med <- predict(rf_model_med, unemp_test_med)
+
+# MSE
+mse_rf_med <- mean((rf_pred_med - unemp_test_med$UNEMP_RATE)^2)
+mse_rf_med # 4.279245
+
+# RMSE
+mse_rf_med <- sqrt(mean((rf_pred_med - unemp_test_med$UNEMP_RATE)^2))
+mse_rf_med # 2.068634
+
+# Plot
+plot(rf_model_med) 
+abline(v=58, col = "red") # ntree = 58 is when the error is the lowest.
+
+
+set.seed(1234)
+
+# Tuning parameters
+mtry_med <- tuneRF(unemp_train_med[-1],
+                  unemp_train_med$UNEMP_RATE, 
+                  ntreeTry=1000,
+                  stepFactor=1.5,
+                  improve=0.01, 
+                  trace=TRUE, 
+                  plot=TRUE)
+
+# Best mtry values
+best_m_med <- mtry_med[mtry_med[, 2] == min(mtry_med[, 2]), 1]
+print(mtry_med)
+print(best_m_med) # 4
+
+# Implement optimal parameters ntree = 58, mtry = 4.
+set.seed(1234)
+
+# Model
+rf_model_best_med <- randomForest(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                                 data = unemp_train_med, 
+                                 mtry = 4,
+                                 ntree = 58,
+                                 importance = TRUE)
+
+# Summary
+summary(rf_model_best_med)
+rf_model_best_med
+
+# Variable importance
+(bg_var_imp_med <- varImpPlot(rf_model_best_med, scale = FALSE))
+
+
+# Performance on train data
+rf_model_best_pre_med_train <- predict(rf_model_best_med, unemp_train_med)
+
+# MSE
+rf_mse_best_med_train <- mean((rf_model_best_pre_med_train - unemp_train_med$UNEMP_RATE)^2)
+rf_mse_best_med_train #0.02955353  
+
+# RMSE
+rf_rmse_best_med_train <- sqrt(mean((rf_model_best_pre_med_train - unemp_train_med$UNEMP_RATE)^2))
+rf_rmse_best_med_train #0.1719114  
+
+
+# Performance on test data
+rf_model_best_pre_med <- predict(rf_model_best_med, unemp_test_med)
+
+# MSE
+rf_mse_best_med <- mean((rf_model_best_pre_med - unemp_test_med$UNEMP_RATE)^2)
+rf_mse_best_med #4.79764  
+
+# RMSE
+rf_rmse_best_med <- sqrt(mean((rf_model_best_pre_med - unemp_test_med$UNEMP_RATE)^2))
+rf_rmse_best_med #2.183034  
+
+
+#-----Random Forest with bootstrap-----
+
+# Define the number of bootstrapped samples (B)
+B <- 100
+
+# Initialize a list to store bagged random forest models
+bagged_rf_models_med <- list()
+
+# Set seed for reproducibility
+set.seed(1234)
+
+# Loop for bootstrapping
+for (i in 1:B) {
+  # Generate a bootstrap sample
+  rf_boot_sample_med <- sample(nrow(unemp_train_med), replace = TRUE)
+  
+  # Train a random forest model on the bootstrap sample
+  rf_boot_model_med <- randomForest(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                                   data = unemp_train_med[rf_boot_sample_med, ], 
+                                   mtry = 4,
+                                   ntree = 58,
+                                   importance = TRUE)
+  
+  # Store the model in the list
+  bagged_rf_models_med[[i]] <- rf_boot_model_med
+}
+
+# Summary
+summary(rf_boot_model_med)
+rf_boot_model_med
+
+
+# Combine predictions from all bagged models on train
+rf_boot_pred_med_train <- numeric(nrow(unemp_train_med))
+for (i in 1:B) {
+  rf_boot_pred_med_train <- rf_boot_pred_med_train + predict(bagged_rf_models_med[[i]], unemp_train_med)
+}
+rf_boot_pred_med_train <- rf_boot_pred_med_train / B
+
+# MSE
+rf_boot_mse_med_train <- mean((rf_boot_pred_med_train - unemp_train_med$UNEMP_RATE)^2)
+rf_boot_mse_med_train # 0.06809317
+
+# RMSE
+rf_boot_rmse_med_train <- sqrt(mean((rf_boot_pred_med_train - unemp_train_med$UNEMP_RATE)^2))
+rf_boot_rmse_med_train # 0.2609467
+
+#MAE
+(rf_boot_train_mae = postResample(pred = rf_boot_pred_med_train, unemp_train_med$UNEMP_RATE))
+#     RMSE    Rsquared       MAE 
+#  0.2609467 0.9805702   0.1716870 
+
+# Combine predictions from all bagged models on test
+rf_boot_pred_med <- numeric(nrow(unemp_test_med))
+for (i in 1:B) {
+  rf_boot_pred_med <- rf_boot_pred_med + predict(bagged_rf_models_med[[i]], unemp_test_med)
+}
+rf_boot_pred_med <- rf_boot_pred_med / B
+
+# MSE
+rf_boot_mse_med <- mean((rf_boot_pred_med - unemp_test_med$UNEMP_RATE)^2)
+rf_boot_mse_med # 3.912915
+
+# RMSE
+rf_boot_rmse_med <- sqrt(mean((rf_boot_pred_med - unemp_test_med$UNEMP_RATE)^2))
+rf_boot_rmse_med # 1.978109
+
+#MAE
+(rf_boot_test_mae = postResample(pred = rf_boot_pred_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  1.9781090  0.2782989    1.8450624 
+```
+
+
+B. Boosting: Median imputation
+```{r}
+#-----Boosting-----
+set.seed(1234)
+
+# Model
+boost_model_med <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                      data = unemp_train_med, 
+                      distribution = "gaussian", 
+                      n.trees = 5000 ,
+                      interaction.depth = 4)
+
+# Summary
+summary(boost_model_med)
+boost_model_med
+
+# Predict
+boost_pred_med <- predict(boost_model_med, unemp_test_med)
+
+# MSE
+boost_mse_med <- mean((boost_pred_med - unemp_test_med$UNEMP_RATE)^2)
+boost_mse_med #2.501521
+
+# RMSE
+boost_rmse_med <- sqrt(mean((boost_pred_med - unemp_test_med$UNEMP_RATE)^2))
+boost_rmse_med #1.58162
+
+# Tuning parameters
+boost_grid_med <-  expand.grid(interaction.depth = c(2,5,10,15),  # Max Tree Depth
+                        n.trees = (1:100), # Boosting Iterations
+                        shrinkage = c(0.001, 0.01, 0.1, 1),# Shrinkage = Learning Rate
+                        n.minobsinnode = c(5,10,20) # minimum number of training set samples in a node to commence splitting
+                        )
+
+
+# Cross-validation
+fitControl_med <- trainControl(method = "cv",
+                              number = 10,
+                              savePredictions = "final")
+
+start_time_boost = Sys.time()  # Start the timer
+
+set.seed(1234)
+
+# Hyperparameter tuning
+boost_grid_train_med <- train(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                             data = unemp_train_med, 
+                             method = "gbm", 
+                             trControl = fitControl_med, 
+                             verbose = FALSE, 
+                             tuneGrid = boost_grid_med)
+
+end_time_boost = Sys.time()  # End the timer
+(time_diff_boost = end_time_boost - start_time_boost) #Time difference of 43.43202 secs
+
+# Best tuning parameters
+(best <- boost_grid_train_med$bestTune)
+
+# n.trees interaction.depth shrinkage n.minobsinnode
+#   82                10       0.1              5       
+
+# Optimal parameter
+set.seed(1234)
+
+# Model with optimal parameters
+best_boost_model_med <- gbm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP, 
+                           data = unemp_train_med, 
+                           distribution = "gaussian",
+                           n.trees = 82,
+                           interaction.depth = 10, 
+                           shrinkage = 0.1,
+                           n.minobsinnode = 5)
+
+# Summary
+summary(best_boost_model_med)
+best_boost_model_med
+
+# Performance on train data 
+best_boost_pred_med_train <- predict(best_boost_model_med, unemp_train_med)
+
+# MSE
+best_boost_mse_med_train <- mean((best_boost_pred_med_train - unemp_train_med$UNEMP_RATE)^2)
+best_boost_mse_med_train #0.01930614
+
+# RMSE
+best_boost_rmse_med_train <- sqrt(mean((best_boost_pred_med_train - unemp_train_med$UNEMP_RATE)^2))
+best_boost_rmse_med_train #0.1389466 
+
+#MAE
+(boost_train_mae = postResample(pred = best_boost_pred_med_train, unemp_train_med$UNEMP_RATE))
+#      RMSE     Rsquared        MAE 
+#  0.13894655  0.99411041   0.09133378 
+
+# Performance on test data 
+best_boost_pred_med <- predict(best_boost_model_med, unemp_test_med)
+
+# MSE
+best_boost_mse_med <- mean((best_boost_pred_med - unemp_test_med$UNEMP_RATE)^2)
+best_boost_mse_med #2.699348
+
+# RMSE
+best_boost_rmse_med <- sqrt(mean((best_boost_pred_med - unemp_test_med$UNEMP_RATE)^2))
+best_boost_rmse_med #1.642969 
+
+#MAE
+(boost_test_mae = postResample(pred = best_boost_pred_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  1.6429694  0.6030349   1.5544369
+```
+
+
+G. SVM, Linear: Median
+```{r}
+#-----SVM, Linear-----
+# Create a sequence of values from 1 to 50
+ln_cost_values_med <- seq(1, 50, by = 1)
+
+# Generate all combinations of the cost values
+svm_lin_tgrid_med <- expand.grid(cost = ln_cost_values_med)
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' hyperparameter tuning.
+svm_lin_tune_med <- tune(svm,
+                 UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                 data = unemp_train_med,
+                 kernel = "linear",
+                 ranges = svm_lin_tgrid_med,
+                 scale = TRUE)
+
+# Summary
+summary(svm_lin_tune_med)
+ 
+# View the best model from tuning.
+(lin_bestmod_med <- svm_lin_tune_med$best.model) 
+#Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  linear 
+#       cost:  3 
+#      gamma:  0.1428571 
+#    epsilon:  0.1 
+#Number of Support Vectors:  110
+
+# Model
+lin_svm_med <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_med,
+                  kernel = "linear",
+                  cost = 3,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+lin_svm_med$index
+
+# View summary of svm model
+summary(lin_svm_med)
+# This tells us, for instance, that a linear kernel was used with cost = 3, and that there were 110 support vectors.
+
+
+# Performance on train
+lin_pre_med_train <- predict(lin_svm_med, unemp_train_med)
+
+# MSE
+lin_mse_med_train = mean((lin_pre_med_train - unemp_train_med$UNEMP_RATE)^2)
+lin_mse_med_train #0.9458506
+
+# RMSE
+lin_rmse_med_train = sqrt(mean((lin_pre_med_train - unemp_train_med$UNEMP_RATE)^2))
+lin_rmse_med_train #0.9725485
+
+#MAE
+(lin_train_mae = postResample(pred = lin_pre_med_train, unemp_train_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+# 0.9725485   0.7308884    0.6599424 
+
+# Performance on test
+lin_pre_med <- predict(lin_svm_med, unemp_test_med)
+
+# MSE
+lin_mse_med = mean((lin_pre_med - unemp_test_med$UNEMP_RATE)^2)
+lin_mse_med #73.51656
+
+# RMSE
+lin_rmse_med = sqrt(mean((lin_pre_med - unemp_test_med$UNEMP_RATE)^2))
+lin_rmse_med #8.57418
+
+#MAE
+(line_test_mae = postResample(pred = lin_pre_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  8.5741799  0.5410879   7.1118548 
+```
+
+
+H. SVM, Radial: Median
+```{r}
+#-----SVM, Radial-----
+
+# Create sequences for cost and gamma
+rad_cost_values_med <- seq(0.1, 5, by = 0.25)
+rad_gamma_values_med <- c(0.01, 0.1, 1, 5)
+                      
+
+# Generate all combinations of the cost values
+svm_rad_tgrid_med <- expand.grid(cost = rad_cost_values_med, gamma = rad_gamma_values_med)
+
+
+start_time_rad_med = Sys.time() #Time how long it takes to run the svm() function
+
+# Ensure the same results
+set.seed(1234)
+
+# Conduct 'cost' and 'gamma' hyperparameter tuning.
+svm_rad_tune_med <- tune(svm,
+                        UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                        data = unemp_train_med,
+                        kernel = "radial",
+                        ranges = svm_rad_tgrid_med,
+                        scale = TRUE)
+
+end_time_rad_med = Sys.time()# End timer.
+runtime_rad_med = end_time_rad_med - start_time_rad_med # Calculate run time.
+print(runtime_rad_med) # Time difference of 11.17665 mins
+
+
+# View the cross-validation errors of the models
+summary(svm_rad_tune_med) # Based on detailed performance results, cost = 4.10 and gamma = 0.1 are the most optimal.
+ 
+# View the best model from tuning.
+(rad_best_mod_med <- svm_rad_tune_med$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  radial 
+#       cost:  4.10 
+#      gamma:  0.1 
+#    epsilon:  0.1 
+#Number of Support Vectors:  108
+
+# Model
+rad_svm_med <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                  data = unemp_train_med,
+                  kernel = "radial",
+                  cost = 4.1,
+                  gamma = 0.1,
+                  epsilon = 0.1,
+                  scale = TRUE)
+
+# We can determine the support vector identities
+rad_svm_med$index
+
+#View summary of svm model
+summary(rad_svm_med)
+#This tells us, for instance, that a linear kernel was used with cost = 4.1, gamma = 0.1, epsilon = 0.1 and that there were 108 support vectors.
+
+
+# Performance on train
+rad_pre_med_train <- predict(rad_svm_med, unemp_train_med)
+
+# MSE
+rad_mse_med_train <- mean((rad_pre_med_train - unemp_train_med$UNEMP_RATE)^2)
+rad_mse_med_train #0.2806018
+
+# RMSE
+rad_rmse_med_train <- sqrt(mean((rad_pre_med_train - unemp_train_med$UNEMP_RATE)^2))
+rad_rmse_med_train #0.5297186
+
+#MAE
+(rad_train_mae = postResample(pred = rad_pre_med_train, unemp_train_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  0.5297186  0.9145497    0.3448363 
+
+
+# Performance on test
+rad_pre_med <- predict(rad_svm_med, unemp_test_med)
+
+# MSE
+rad_mse_med <- mean((rad_pre_med - unemp_test_med$UNEMP_RATE)^2)
+rad_mse_med #3.00141
+
+# RMSE
+rad_rmse_med <- sqrt(mean((rad_pre_med - unemp_test_med$UNEMP_RATE)^2))
+rad_rmse_med #1.732458
+
+#MAE
+(rad_test_mae = postResample(pred = rad_pre_med, unemp_test_med$UNEMP_RATE))
+#     RMSE     Rsquared       MAE 
+#  1.7324577  0.1283899   1.5637828 
+
+```
+
+I. SVM, polynomial: Median 
+```{r}
+#-----SVM, polynomial -----
+
+#Ensure the same results
+set.seed(1234)
+
+#Conduct 'cost', 'gamma', and 'degree' hyperparameter tuning for polynomial SVM model. Fit the support vector classifier with 'scale = TRUE'.
+
+poly_tune_med <- tune(svm,
+                 UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+                 data = unemp_train_med,
+                 kernel = "polynomial",
+                 ranges = list(cost = c(0.1, 1, 2, 3, 5),
+                               gamma = c(0.001, 0.01, 0.1, 1),
+                               degree = c(2, 3, 4)),
+                 scale = TRUE)
+
+# Summary of best model
+summary(poly_tune_med$best.model)
+# Parameters:
+#   SVM-Type:  eps-regression 
+# SVM-Kernel:  polynomial 
+#       cost:  3 
+#     degree:  2 
+#      gamma:  0.01 
+#     coef.0:  0 
+#    epsilon:  0.1 
+# Number of Support Vectors:  139
+
+
+# Model with best parameters
+poly_svm_med <- svm(UNEMP_RATE ~ GDP + GOV_FCE + CHNG_FCE_ALL_IND + TTI + CPI + JOB_VACAN + RES_POP,
+               data = unemp_train_med,
+               kernel = "polynomial",
+               cost = 3,
+               gamma = 0.01,
+               degree = 2,
+               scale = TRUE)
+
+# We can determine the support vector identities
+poly_svm_med$index
+
+# Summary
+summary(poly_svm_med)
+# This tells us, for instance, that a linear kernel was used with cost = 3, degree = 2, gamma = 0.01 and that there were 139 support vectors.
+
+
+# Performance on train
+poly_pre_med_train <- predict(poly_svm_med, unemp_train_med)
+
+# MSE
+poly_mse_med_train <- mean((poly_pre_med_train - unemp_train_med$UNEMP_RATE)^2)
+poly_mse_med_train #3.399824
+
+# RMSE
+poly_rmse_med_train <- sqrt(mean((poly_pre_med_train - unemp_train_med$UNEMP_RATE)^2))
+poly_rmse_med_train #1.843861
+
+#MAE
+(poly_train_mae = postResample(pred = poly_pre_med_train, unemp_train_med$UNEMP_RATE))
+#       RMSE    Rsquared        MAE 
+#   1.84386110 0.08718197   1.41959618 
+
+# Performance on test
+poly_pre_med <- predict(poly_svm_med, unemp_test_med)
+
+# MSE
+poly_mse_med <- mean((poly_pre_med - unemp_test_med$UNEMP_RATE)^2)
+poly_mse_med #3.812724
+
+# RMSE
+poly_rmse_med <- sqrt(mean((poly_pre_med - unemp_test_med$UNEMP_RATE)^2))
+poly_rmse_med #1.95262
+
+#MAE
+(poly_test_mae = postResample(pred = poly_pre_med, unemp_test_med$UNEMP_RATE))
+#     RMSE   Rsquared       MAE 
+# 1.9526198 0.1693279    1.8144649 
+
+```
+
+MSE and RMSEComparison
+```{r}
+#Train
+Alg_Comparison_med_train = print(paste("Machine Learnign Algorithm Comparisons on training:", "Ridge Regression: MSE =", ridge_mse_med_training,",", "RMSE:", ridge_rmse_med_training, "Lasso Regression: MSE =", lasso_mse_med_training, "RMSE:", lasso_rmse_med_training,",", "CARTs: MSE =", CART_mse_med_train, ",", "RMSE:", CART_rmse_med_train, "Bagging: MSE =", bag_boot_mse_med_train, ",", "RMSE:", bag_boot_rmse_med_train, "Random Forest: MSE =", rf_boot_mse_med_train, ",", "RMSE:", rf_boot_rmse_med_train, "Boosting: MSE =", best_boost_mse_med_train, ",", "RMSE:", best_boost_rmse_med_train, "SVM Linear: MSE =", lin_mse_med_train, ",", "RMSE:", lin_rmse_med_train,"SVM Radial: MSE =", rad_mse_med_train, ",", "RMSE:", rad_rmse_med_train, ",", "SVM Polynomial: MSE =", poly_mse_med_train, "RMSE:", poly_rmse_med_train))
+
+
+#Test
+Alg_Comparison_med = print(paste("Machine Learnign Algorithm Comparisons on test:", "Ridge Regression: MSE =", ridge_mse_med,",", "RMSE:", ridge_rmse_med, "Lasso Regression: MSE =", lasso_mse_med, "RMSE:", lasso_rmse_med,",", "CARTs: MSE =", CART_mse_med, ",", "RMSE:", CART_rmse_med, "Bagging: MSE =", bag_boot_mse_med, ",", "RMSE:", bag_boot_rmse_med, "Random Forest: MSE =", rf_boot_mse_med, ",", "RMSE:", rf_boot_rmse_med, "Boosting: MSE =", best_boost_mse_med, ",", "RMSE:", best_boost_rmse_med, "SVM Linear: MSE =", lin_mse_med, ",", "RMSE:", lin_rmse_med,"SVM Radial: MSE =", rad_mse_med, ",", "RMSE:", rad_rmse_med, ",", "SVM Polynomial: MSE =", poly_mse_med, "RMSE:", poly_rmse_med))
+```
+
+
+Artificial Neural Network: Median
+```{r}
+# Separate response variables for train and test
+unemp_train_nn_y_med = unemp_train_med$UNEMP_RATE
+unemp_test_nn_y_med = unemp_test_med$UNEMP_RATE
+
+# Separate predictor variables for train and test
+unemp_train_nn_x_med = unemp_train_med[,-1]
+unemp_test_nn_x_med = unemp_test_med[,-1]
+
+# Scale
+mean_med <- apply(unemp_train_nn_x_med, 2, mean)
+std_med <- apply(unemp_train_nn_x_med, 2, sd)
+
+unemp_train_nn_x_med <- scale(unemp_train_nn_x_med, center = mean_med, scale = std_med)
+head(unemp_train_nn_x_med)
+dim(unemp_train_nn_x_med) # 153   7
+sum(is.na(unemp_train_nn_x_med)) # 0
+
+unemp_test_nn_x_med <- scale(unemp_test_nn_x_med, center = mean_med, scale = std_med)
+head(unemp_test_nn_x_med)
+dim(unemp_test_nn_x_med) # 10  7
+sum(is.na(unemp_test_nn_x_med)) # 0
+
+#As there are so few training data, the network will be very small network (shallow) with two hidden layers, each with 64 units. In general, the less training data you have, the worse overfitting will be, and using a small network is one way to mitigate overfitting
+
+#------ NN with adam-----
+# Define layers
+nn_model_adam_med <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = "relu", input_shape = c(ncol(unemp_test_nn_x_med))) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 1)
+
+# Define metrics
+nn_model_adam_med %>% compile(
+  optimizer = "adam",
+  loss = "mse",
+  metrics = c("mae"))
+
+set.seed(1234)
+
+# Create model history
+nn_model_adam_hist_med <- nn_model_adam_med %>%
+  fit(unemp_train_nn_x_med, 
+      unemp_train_nn_y_med,
+      epochs = 300,
+      batch_size = 8,
+      validation_split = 1/3) # Random fraction of the training data to be with-held during each epoch to be used as a pseudo validation data set and the remaining fraction of the training data are used as to train the network parameters during the epoch.
+
+# A plot of the bootstrapped validation MAE loss from network model training history.
+nn_epoch_plot_adam_med <- data.frame(x = c(5:nn_model_adam_hist_med$params$epochs), 
+                                y = nn_model_adam_hist_med$metrics$val_mae[-c(1:4)])
+
+# Visualisation
+ggplot(nn_epoch_plot_adam_med, aes(x=x, y=y)) +geom_smooth() +xlab("epoch") +ylab("Estimated Validation MAE loss") + geom_vline(xintercept = 80, linetype="dotted", color = "red", size=1.5)
+
+# Indicates that epochs beyond 130 (lowest point) overfit on the training data.
+
+#A network build on the entire training data set with 130 epochs should produce a network that is a balance between the training data and future predictions.
+
+#remove previous model
+rm(nn_model_adam_med)
+
+# Layers
+nn_model_adam_med <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = "relu", input_shape = c(ncol(unemp_test_nn_x_med))) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 1)
+
+# Define metrics
+nn_model_adam_med %>% compile(
+  optimizer = "adam",
+  loss = "mse",
+  metrics = c("mae"))
+
+set.seed(1234)
+
+# Model
+nn_model_adam_med %>% fit(unemp_train_nn_x_med,
+                 unemp_train_nn_y_med,
+                 epochs = 80,
+                 validation_data = list(unemp_test_nn_x_med, unemp_test_nn_y_med),
+                 verbose = 1)
+
+# After the network has been tuned to a suitable number of epochs, the validation data can be predicted using the evaluate() function.
+nn_results_adam_med <- nn_model_adam_med %>% evaluate(unemp_test_nn_x_med, unemp_test_nn_y_med)
+
+#Summary
+nn_results_adam_med
+
+#    loss      mae 
+#  6.481186 2.235505   
+
+
+#------ NN with rmsprop-----
+# Define layers
+nn_model_rmsprop_med <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = "relu", input_shape = c(ncol(unemp_test_nn_x_med))) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 1)
+
+# Define metrics
+nn_model_rmsprop_med %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae"))
+
+set.seed(1234)
+
+# Create model history
+nn_model_rmsprop_hist_med <- nn_model_rmsprop_med %>%
+  fit(unemp_train_nn_x_med, 
+      unemp_train_nn_y_med,
+      epochs = 300,
+      batch_size = 8,
+      validation_split = 1/3) # Random fraction of the training data to be with-held during each epoch to be used as a pseudo validation data set and the remaining fraction of the training data are used as to train the network parameters during the epoch.
+
+# A plot of the bootstrapped validation MAE loss from network model training history.
+nn_epoch_plot_rmsprop_med <- data.frame(x = c(5:nn_model_rmsprop_hist_med$params$epochs), 
+                                y = nn_model_rmsprop_hist_med$metrics$val_mae[-c(1:4)])
+
+# Visualisation
+ggplot(nn_epoch_plot_rmsprop_med, aes(x=x, y=y)) +geom_smooth() +xlab("epoch") +ylab("Estimated Validation MAE loss") + geom_vline(xintercept = 4, linetype="dotted", color = "red", size=1.5)
+
+# Indicates that epochs beyond 130 (lowest point) overfit on the training data.
+
+#A network build on the entire training data set with 130 epochs should produce a network that is a balance between the training data and future predictions.
+
+#remove previous model
+rm(nn_model_rmsprop_med)
+
+# Layers
+nn_model_rmsprop_med <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = "relu", input_shape = c(ncol(unemp_test_nn_x_med))) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 1)
+
+# Define metrics
+nn_model_rmsprop_med %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae"))
+
+set.seed(1234)
+
+# Model
+nn_model_rmsprop_med %>% fit(unemp_train_nn_x_med,
+                 unemp_train_nn_y_med,
+                 epochs = 440,
+                 validation_data = list(unemp_test_nn_x_med, unemp_test_nn_y_med))
+
+# After the network has been tuned to a suitable number of epochs, the validation data can be predicted using the evaluate() function.
+nn_results_rmsprop_med <- nn_model_rmsprop_med %>% evaluate(unemp_test_nn_x_med, unemp_test_nn_y_med)
+
+#Summary
+nn_results_rmsprop_med
+
+#    loss      mae 
+#  1.632408 1.122909   
+```
+The previous ANN models are not used. Please disreagard. I have created for-loops to find the optimal ANN. Please refer to the code below for NN
+
+Using forloop for hyperparameter tuning (1 layers)
+```{r}
+#------ NN adam ------
+
+# Define lists of parameters to tune
+epochs_list <- c(100, 200, 300)
+units_list <- c(32, 64, 128)
+batch_sizes <- c(8, 16, 32)
+
+#Set cross validation amount
+k <- 4  # Number of folds for cross-validation
+
+# Create an empty list to store the results
+results_adam_1 <- list()
+
+# Iterate through parameter combinations
+for (epochs in epochs_list) {
+  for (units in units_list) {
+    for (batch_size in batch_sizes) {
+      cat("Training with epochs =", epochs, ", units =", units, ", batch size =", batch_size, "\n")
+      
+      # Create a vector to store cross-validation results
+      cv_scores_adam_1 <- numeric(k)
+      
+      for (i in 1:k) {
+        cat("Processing fold #", i, "\n")
+        
+        # Define and compile the model
+        nn_model_adam_1 <- keras_model_sequential() %>%
+          layer_dense(units = units, activation = "relu", input_shape = c(ncol(unemp_train_nn_x_med))) %>%
+          layer_dense(units = 1)
+        
+        nn_model_adam_1 %>% compile(
+          optimizer = "adam",
+          loss = "mse",
+          metrics = c("mae"))
+        
+        set.seed(1234)
+        
+        # Split data into training and validation sets for this fold
+        val_indices_adam_1 <- which(fold_id == i)
+        val_data_adam_1 <- unemp_train_nn_x_med[val_indices_adam_1, ]
+        val_targets_adam_1 <- unemp_train_nn_y_med[val_indices_adam_1]
+        partial_train_data_adam_1 <- unemp_train_nn_x_med[-val_indices_adam_1, ]
+        partial_train_targets_adam_1 <- unemp_train_nn_y_med[-val_indices_adam_1]
+        
+        # Train the model
+        nn_model_hist_adam_1 <- nn_model_adam_1 %>%
+          fit(partial_train_data_adam_1, 
+              partial_train_targets_adam_1,
+              epochs = epochs,
+              batch_size = batch_size,
+              verbose = 1)
+        
+        # Evaluate the model on the validation data for this fold
+        val_metrics_adam_1 <- nn_model_adam_1 %>% evaluate(val_data_adam_1, val_targets_adam_1, verbose = 0)
+        cv_scores_adam_1[i] <- val_metrics_adam_1[['mae']]
+      }
+      
+      # Store the cross-validation results for this combination of hyperparameters
+      results_adam_1[[paste("epochs", epochs, "_units", units, "_batch", batch_size, sep = "_")]] <- mean(cv_scores_adam_1)
+    }
+  }
+}
+
+View(results_adam_1)
+Best_results_adam_1 = results_adam_1[["epochs_300__units_32__batch_8"]]
+Best_results_adam_1 # epochs = 300, units = 32, batch = 8, MAE = 0.5002812
+
+#------ NN rmsprop ------
+# Create an empty list to store the results
+results_rmsprop_1 <- list()
+
+# Iterate through parameter combinations
+for (epochs in epochs_list) {
+  for (units in units_list) {
+    for (batch_size in batch_sizes) {
+      cat("Training with epochs =", epochs, ", units =", units, ", batch size =", batch_size, "\n")
+      
+      # Create a vector to store cross-validation results
+      cv_scores_rmsprop_1 <- numeric(k)
+      
+      for (i in 1:k) {
+        cat("Processing fold #", i, "\n")
+        
+        # Define and compile the model
+        nn_model_rmsprop_1 <- keras_model_sequential() %>%
+          layer_dense(units = units, activation = "relu", input_shape = c(ncol(unemp_train_nn_x_med))) %>%
+          layer_dense(units = 1)
+        
+        nn_model_rmsprop_1 %>% compile(
+          optimizer = "rmsprop",
+          loss = "mse",
+          metrics = c("mae"))
+        
+        set.seed(1234)
+        
+        # Split data into training and validation sets for this fold
+        val_indices_rmsprop_1 <- which(fold_id == i)
+        val_data_rmsprop_1 <- unemp_train_nn_x_med[val_indices_rmsprop_1, ]
+        val_targets_rmsprop_1 <- unemp_train_nn_y_med[val_indices_rmsprop_1]
+        partial_train_data_rmsprop_1 <- unemp_train_nn_x_med[-val_indices_rmsprop_1, ]
+        partial_train_targets_rmsprop_1 <- unemp_train_nn_y_med[-val_indices_rmsprop_1]
+        
+        # Train the model
+        nn_model_hist_rmsprop_1 <- nn_model_rmsprop_1 %>%
+          fit(partial_train_data_rmsprop_1, 
+              partial_train_targets_rmsprop_1,
+              epochs = epochs,
+              batch_size = batch_size,
+              verbose = 1)
+        
+        # Evaluate the model on the validation data for this fold
+        val_metrics_rmsprop_1 <- nn_model_rmsprop_1 %>% evaluate(val_data_rmsprop_1, val_targets_rmsprop_1, verbose = 0)
+        cv_scores_rmsprop_1[i] <- val_metrics_rmsprop_1[['mae']]
+      }
+      
+      # Store the cross-validation results for this combination of hyperparameters
+      results_rmsprop_1[[paste("epochs", epochs, "_units", units, "_batch", batch_size, sep = "_")]] <- mean(cv_scores_rmsprop_1)
+    }
+  }
+}
+
+View(results_rmsprop_1)
+Best_results_rmsprop_1 = results_rmsprop_1[["epochs_300__units_128__batch_16"]]
+Best_results_rmsprop_1 #epochs = 300, units = 128, batch = 15, MAE 0.4770097
+```
+
+Using forloop for hyperparameter tuning (2 layers)
+```{r}
+
+#----- NN adam-----
+# Create an empty list to store the results
+results_adam <- list()
+
+# Iterate through parameter combinations
+for (epochs in epochs_list) {
+  for (units in units_list) {
+    for (batch_size in batch_sizes) {
+      cat("Training with epochs =", epochs, ", units =", units, ", batch size =", batch_size, "\n")
+      
+      # Create a vector to store cross-validation results
+      cv_scores <- numeric(k)
+      
+      for (i in 1:k) {
+        cat("Processing fold #", i, "\n")
+        
+        # Define and compile the model
+        nn_model_adam <- keras_model_sequential() %>%
+          layer_dense(units = units, activation = "relu", input_shape = c(ncol(unemp_train_nn_x_med))) %>%
+          layer_dense(units = units, activation = "relu") %>%
+          layer_dense(units = 1)
+        
+        nn_model_adam %>% compile(
+          optimizer = "adam",
+          loss = "mse",
+          metrics = c("mae"))
+        
+        set.seed(1234)
+        
+        # Split data into training and validation sets for this fold
+        val_indices <- which(fold_id == i)
+        val_data <- unemp_train_nn_x_med[val_indices, ]
+        val_targets <- unemp_train_nn_y_med[val_indices]
+        partial_train_data <- unemp_train_nn_x_med[-val_indices, ]
+        partial_train_targets <- unemp_train_nn_y_med[-val_indices]
+        
+        # Train the model
+        nn_model_hist_adam <- nn_model_adam %>%
+          fit(partial_train_data, 
+              partial_train_targets,
+              epochs = epochs,
+              batch_size = batch_size,
+              verbose = 1)
+        
+        # Evaluate the model on the validation data for this fold
+        val_metrics <- nn_model_adam %>% evaluate(val_data, val_targets, verbose = 0)
+        cv_scores[i] <- val_metrics[['mae']]
+      }
+      
+      # Store the cross-validation results for this combination of hyperparameters
+      results_adam[[paste("epochs", epochs, "_units", units, "_batch", batch_size, sep = "_")]] <- mean(cv_scores)
+    }
+  }
+}
+
+View(results_adam)
+Best_results_adam_2 = results_adam[["epochs_200__units_32__batch_8"]]
+Best_results_adam_2 # epochs = 200, units = 32, batch = 8, MAE = 0.4569995
+
+#------ NN rmsprop ------
+
+start_time_nn = Sys.time()  # Start the timer
+# Create an empty list to store the results
+results_rmsprop_2 <- list()
+
+# Iterate through parameter combinations
+for (epochs in epochs_list) {
+  for (units in units_list) {
+    for (batch_size in batch_sizes) {
+      cat("Training with epochs =", epochs, ", units =", units, ", batch size =", batch_size, "\n")
+      
+      # Create a vector to store cross-validation results
+      cv_scores_rmsprop_2 <- numeric(k)
+      
+      for (i in 1:k) {
+        cat("Processing fold #", i, "\n")
+        
+        # Define and compile the model
+        nn_model_rmsprop_2 <- keras_model_sequential() %>%
+          layer_dense(units = units, activation = "relu", input_shape = c(ncol(unemp_train_nn_x_med))) %>%
+          layer_dense(units = units, activation = "relu") %>%
+          layer_dense(units = 1)
+        
+        nn_model_rmsprop_2 %>% compile(
+          optimizer = "rmsprop",
+          loss = "mse",
+          metrics = c("mae"))
+        
+        set.seed(1234)
+        
+        # Split data into training and validation sets for this fold
+        val_indices_rmsprop_2 <- which(fold_id == i)
+        val_data_rmsprop_2 <- unemp_train_nn_x_med[val_indices_rmsprop_2, ]
+        val_targets_rmsprop_2 <- unemp_train_nn_y_med[val_indices_rmsprop_2]
+        partial_train_data_rmsprop_2 <- unemp_train_nn_x_med[-val_indices_rmsprop_2, ]
+        partial_train_targets_rmsprop_2 <- unemp_train_nn_y_med[-val_indices_rmsprop_2]
+        
+        # Train the model
+        nn_model_hist_rmsprop_2 <- nn_model_rmsprop_2 %>%
+          fit(partial_train_data_rmsprop_2, 
+              partial_train_targets_rmsprop_2,
+              epochs = epochs,
+              batch_size = batch_size,
+              verbose = 1)
+        
+        # Evaluate the model on the validation data for this fold
+        val_metrics_rmsprop_2 <- nn_model_rmsprop_2 %>% evaluate(val_data_rmsprop_2, val_targets_rmsprop_2, verbose = 0)
+        cv_scores_rmsprop_2[i] <- val_metrics_rmsprop_2[['mae']]
+      }
+      
+      # Store the cross-validation results for this combination of hyperparameters
+      results_rmsprop_2[[paste("epochs", epochs, "_units", units, "_batch", batch_size, sep = "_")]] <- mean(cv_scores_rmsprop_2)
+    }
+  }
+}
+
+end_time_nn = Sys.time()  # End the timer
+(time_diff_nn = end_time_nn - start_time_nn) # Time difference of 54.46687 mins
+
+# A plot of the bootstrapped validation MAE loss from network model training history.
+nn_model_hist_rmsprop_2_plot <- data.frame(x = c(nn_model_hist_rmsprop_2$params$epochs), 
+                                y = nn_model_hist_rmsprop_2$metrics)
+
+# Visualisation
+ggplot(nn_epoch_plot_rmsprop_med, aes(x=x, y=y)) +geom_smooth() +xlab("epoch") +ylab("Estimated Validation MAE loss") + geom_vline(xintercept = 30, linetype="dotted", color = "red", size=1.5)
+
+
+plot(nn_model_hist_rmsprop_2)
+
+View(results_rmsprop_2)
+Best_results_rmsprop_2 = results_rmsprop_2[["epochs_200__units_32__batch_16"]]
+Best_results_rmsprop_2 # epochs = 200, units = 32, batch = 16, MAE 0.3679621
+```
+
+
+Using forloop for hyperparameter tuning (3 layers)
+```{r}
+#------ NN adam ------
+
+
+# Create an empty list to store the results
+results_adam_3 <- list()
+
+# Iterate through parameter combinations
+for (epochs in epochs_list) {
+  for (units in units_list) {
+    for (batch_size in batch_sizes) {
+      cat("Training with epochs =", epochs, ", units =", units, ", batch size =", batch_size, "\n")
+      
+      # Create a vector to store cross-validation results
+      cv_scores_adam_3 <- numeric(k)
+      
+      for (i in 1:k) {
+        cat("Processing fold #", i, "\n")
+        
+        # Define and compile the model
+        nn_model_adam_3 <- keras_model_sequential() %>%
+          layer_dense(units = units, activation = "relu", input_shape = c(ncol(unemp_train_nn_x_med))) %>%
+          layer_dense(units = units, activation = "relu") %>%
+          layer_dense(units = units, activation = "relu") %>%
+          layer_dense(units = 1)
+        
+        nn_model_adam_3 %>% compile(
+          optimizer = "adam",
+          loss = "mse",
+          metrics = c("mae"))
+        
+        set.seed(1234)
+        
+        # Split data into training and validation sets for this fold
+        val_indices_adam_3 <- which(fold_id == i)
+        val_data_adam_3 <- unemp_train_nn_x_med[val_indices_adam_3, ]
+        val_targets_adam_3 <- unemp_train_nn_y_med[val_indices_adam_3]
+        partial_train_data_adam_3 <- unemp_train_nn_x_med[-val_indices_adam_3, ]
+        partial_train_targets_adam_3 <- unemp_train_nn_y_med[-val_indices_adam_3]
+        
+        # Train the model
+        nn_model_hist_adam_3 <- nn_model_adam_3 %>%
+          fit(partial_train_data_adam_3, 
+              partial_train_targets_adam_3,
+              epochs = epochs,
+              batch_size = batch_size,
+              verbose = 1)
+        
+        # Evaluate the model on the validation data for this fold
+        val_metrics_adam_3 <- nn_model_adam_3 %>% evaluate(val_data_adam_3, val_targets_adam_3, verbose = 0)
+        cv_scores_adam_3[i] <- val_metrics_adam_3[['mae']]
+      }
+      
+      # Store the cross-validation results for this combination of hyperparameters
+      results_adam_3[[paste("epochs", epochs, "_units", units, "_batch", batch_size, sep = "_")]] <- mean(cv_scores_adam_3)
+    }
+  }
+}
+
+View(results_adam_3)
+Best_results_adam_3 = results_adam_3[["epochs_200__units_32__batch_8"]]
+Best_results_adam_3 #epochs = 200, units = 32, batch = 8,  MAE = 0.4894649
+
+#------ NN rmsprop ------
+# Create an empty list to store the results
+results_rmsprop_3 <- list()
+
+# Iterate through parameter combinations
+for (epochs in epochs_list) {
+  for (units in units_list) {
+    for (batch_size in batch_sizes) {
+      cat("Training with epochs =", epochs, ", units =", units, ", batch size =", batch_size, "\n")
+      
+      # Create a vector to store cross-validation results
+      cv_scores_rmsprop_3 <- numeric(k)
+      
+      for (i in 1:k) {
+        cat("Processing fold #", i, "\n")
+        
+        # Define and compile the model
+        nn_model_rmsprop_3 <- keras_model_sequential() %>%
+          layer_dense(units = units, activation = "relu", input_shape = c(ncol(unemp_train_nn_x_med))) %>%
+          layer_dense(units = units, activation = "relu") %>%
+          layer_dense(units = units, activation = "relu") %>%
+          layer_dense(units = 1)
+        
+        nn_model_rmsprop_3 %>% compile(
+          optimizer = "rmsprop",
+          loss = "mse",
+          metrics = c("mae"))
+        
+        set.seed(1234)
+        
+        # Split data into training and validation sets for this fold
+        val_indices_rmsprop_3 <- which(fold_id == i)
+        val_data_rmsprop_3 <- unemp_train_nn_x_med[val_indices_rmsprop_3, ]
+        val_targets_rmsprop_3 <- unemp_train_nn_y_med[val_indices_rmsprop_3]
+        partial_train_data_rmsprop_3 <- unemp_train_nn_x_med[-val_indices_rmsprop_3, ]
+        partial_train_targets_rmsprop_3 <- unemp_train_nn_y_med[-val_indices_rmsprop_3]
+        
+        # Train the model
+        nn_model_hist_rmsprop_3 <- nn_model_rmsprop_3 %>%
+          fit(partial_train_data_rmsprop_3, 
+              partial_train_targets_rmsprop_3,
+              epochs = epochs,
+              batch_size = batch_size,
+              verbose = 1)
+        
+        # Evaluate the model on the validation data for this fold
+        val_metrics_rmsprop_3 <- nn_model_rmsprop_3 %>% evaluate(val_data_rmsprop_3, val_targets_rmsprop_3, verbose = 0)
+        cv_scores_rmsprop_3[i] <- val_metrics_rmsprop_3[['mae']]
+      }
+      
+      # Store the cross-validation results for this combination of hyperparameters
+      results_rmsprop_3[[paste("epochs", epochs, "_units", units, "_batch", batch_size, sep = "_")]] <- mean(cv_scores_rmsprop_3)
+    }
+  }
+}
+
+View(results_rmsprop_3)
+Best_results_rmsprop_3 = results_rmsprop_3[["epochs_200__units_32__batch_16"]]
+Best_results_rmsprop_3 # epochs = 200, units = 32, batch = 16, MAE 0.5315303
+```
+
+
+```{r}
+print("Based on the forloop hyperparameter tuning and evaluating their performances on training, the best model was the 2 layer NN using an 'rmsprop', epochs = 200, units = 32, batch = 16, MAE 0.3679621")
+```
+
+Conduct testing data on optimal ann
+```{r}
+# Layers
+best_nn_model_rmsprop_med <- keras_model_sequential() %>%
+  layer_dense(units = 32, activation = "relu", input_shape = c(ncol(unemp_test_nn_x_med))) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dense(units = 1)
+
+# Define metrics
+best_nn_model_rmsprop_med %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae"))
+
+set.seed(1234)
+
+# Model
+best_nn_model_rmsprop_med %>% fit(unemp_train_nn_x_med,
+                 unemp_train_nn_y_med,
+                 epochs = 200,
+                 batch_size = 16,
+                 validation_data = list(unemp_test_nn_x_med, unemp_test_nn_y_med))
+
+# After the network has been tuned to a suitable number of epochs, the validation data can be predicted using the evaluate() function.
+best_nn_results_rmsprop_med <- best_nn_model_rmsprop_med %>% evaluate(unemp_test_nn_x_med, unemp_test_nn_y_med)
+
+#Summary
+best_nn_results_rmsprop_med
+
+#    MSE      mae 
+# 2.330682 1.220769 
+
+#RMSE
+(best_nn_results_rmsprop_med_rmse = sqrt(best_nn_results_rmsprop_med[['loss']]))
+# 1.526657
+```
